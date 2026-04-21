@@ -143,7 +143,13 @@ done
 #-----------------------------------------------
  
 cd ~/GSE174609_scRNA/raw_data
- 
+
+## Remove any prefixes to SRR if necessary (e.g. leftover from nfcore-fetchngs)
+# for file in SRX*.fastq.gz; do
+#     new_name="${file#*_}"
+#     mv -- "$file" "$new_name"
+# done
+
 # SRR14575500 corresponds to Healthy donor #1
 # Cell Ranger expects format: SampleName_S1_L001_R1_001.fastq.gz
  
@@ -155,8 +161,8 @@ cd ~/GSE174609_scRNA/raw_data
 
 # Code suggested by Claude 2026-04-20 to perform prefix and suffix renaming
 
-old_prefixes=SRRS
-new_prefixes=SAMPLES
+old_prefixes=("${SRRS[@]}")
+new_prefixes=("${SAMPLES[@]}")
 
 old_suffixes=("_1.fastq.gz" "_2.fastq.gz")
 new_suffixes=("_S1_L001_R1_001.fastq.gz" "_S1_L001_R2_001.fastq.gz")

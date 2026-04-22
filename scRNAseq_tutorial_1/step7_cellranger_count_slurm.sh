@@ -5,14 +5,14 @@
 # make executable with chmod +x and run on slurm with sbatch script.sh command
 #-----------------------------------------------
 
-#SBATCH --partition=partition_name              # Adjust based on your HPC partitions
+#SBATCH --partition=standard              # Adjust based on your HPC partitions
 #SBATCH --cpus-per-task=16             # Number of CPU cores
 #SBATCH --mem=120G                     # Memory allocation (120GB recommended for human genome)
 #SBATCH --job-name=cellranger_array
 #SBATCH --array=1-12                   # Process samples 1-12 in parallel
 #SBATCH --output=logs/cellranger_%A_%a.out    # %A = job ID, %a = array task ID
 #SBATCH --error=logs/cellranger_%A_%a.err
-#SBATCH --mail-user=your.email@institution.edu
+#SBATCH --mail-user=sjmatkovich@live.com
 #SBATCH --mail-type=END,FAIL
 #SBATCH --time=0-4:00:00               # Time limit per sample
  
@@ -34,8 +34,8 @@ SAMPLES=("Healthy_1" "Healthy_2" "Healthy_3" "Healthy_4" \
 SAMPLE_ID=${SAMPLES[$SLURM_ARRAY_TASK_ID-1]}
  
 # Define paths
-PROJECT_DIR=~/GSE174609                # Main project directory
-FASTQ_DIR=${PROJECT_DIR}/fastq         # Directory containing FASTQ files
+PROJECT_DIR=~/GSE174609_scRNA               # Main project directory
+FASTQ_DIR=${PROJECT_DIR}/raw_data        # Directory containing FASTQ files
 OUTPUT_DIR=${PROJECT_DIR}/cellranger_output
 REFERENCE=~/references/cellranger/refdata-gex-GRCh38-2024-A
  

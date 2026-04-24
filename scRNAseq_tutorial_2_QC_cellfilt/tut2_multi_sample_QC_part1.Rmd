@@ -1,5 +1,6 @@
 ---
-title: "ngs101_scRNAseq_walkthrough_2_QC"
+title: "ngs101_scRNAseq_walkthrough_2_QC - adapted to multiple samples"
+subtitle: "part 1 - empty droplets, ambient RNA, doublet detection"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 output:
@@ -19,47 +20,14 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Description
 
-### Dataset Overview: GSE174609 PBMC Study
-
-We’re working with the GSE174609 dataset, which examines immune cell responses
-in periodontitis patients. This study includes 12 samples total.
-
-For this tutorial, we’ll perform QC on one sample: Healthy_1 (SRR14575500) to
-demonstrate the complete workflow.
-
-Reference: See Part 1 of this tutorial series for details on processing FASTQ
-files through Cell Ranger to generate the count matrices we’ll use here.
-
-### Why PBMCs Are Ideal for Learning
-
-PBMCs are the “gold standard” for single-cell tutorials because they:
-
-✅ Contain well-characterized cell types\
-✅ Have clear marker genes (CD3D for T cells, CD14 for monocytes, etc.)\
-✅ Show moderate complexity (not too simple, not too complex)\
-✅ Are relatively easy to dissociate (good quality data)\
-✅ Have abundant reference datasets for comparison
-
-### Key Quality Metrics to Watch
-
-Throughout this tutorial, we’ll monitor:
-
-nCount_RNA: Total UMI counts per cell (expect: 1,000-50,000) nFeature_RNA:
-Unique genes detected per cell (expect: 500-5,000) percent.mt: Mitochondrial
-gene percentage (expect: \<5% for healthy cells) Doublet rate: Expected \~0.5-2%
-for our cell count Ambient RNA contamination: Expected \<5% for well-prepared
-PBMCs
-
-## Step 1: Libraries and directories
-
 Primary source:
+
 <https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-2-quality-control-and-cell-filtering>
 
+## Libraries and directories
+
 ```{r step1_libs_data}
-#-----------------------------------------------
-# STEP 1: Load libraries and configure environment
-#-----------------------------------------------
- 
+
 # Core single-cell analysis
 library(Seurat)              # Main scRNA-seq toolkit
 library(SeuratObject)        # Seurat object infrastructure
@@ -77,7 +45,7 @@ library(dplyr)               # Data manipulation
  
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
-qc.dir <- file.path(base.dir,"qc_analysis")
+qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
 if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
 filt.dir <- file.path(base.dir,"filtered_data")
 if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
@@ -92,332 +60,182 @@ set.seed(27)
 # Verify Seurat 5 installation
 cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
 cat("R version:", R.version.string, "\n")
-cat("Working directory:", getwd(), "\n\n")
- 
-# Check for Seurat 5 features
-if (packageVersion("Seurat") >= "5.0.0") {
-  cat("✓ Seurat 5 detected - layer-based architecture available\n")
-} else {
-  warning("Please upgrade to Seurat 5 for this tutorial")
-}
 ```
 
-## Step 2: Loading and Initial Inspection of 10x Data
+## Define sample paths and correction parameters
 
-Cell Ranger (10x Genomics’ processing pipeline) outputs three key files that
-we’ll load:
-
-matrix.mtx.gz: Sparse UMI count matrix features.tsv.gz: Gene names and IDs
-barcodes.tsv.gz: Cell barcodes Understanding Your Cell Ranger Output Structure
-
-```         
-~/GSE174609_scRNA/cellranger_output/Healthy_1/outs/
-├── filtered_feature_bc_matrix/    # Cell Ranger's filtered cells (~3,000-5,000)
-│   ├── barcodes.tsv.gz           # Already filtered for empty droplets
-│   ├── features.tsv.gz
-│   └── matrix.mtx.gz
-├── raw_feature_bc_matrix/         # ALL droplets (~20,000-100,000)
-│   ├── barcodes.tsv.gz           # Includes empty droplets + cells
-│   ├── features.tsv.gz
-│   └── matrix.mtx.gz
-└── web_summary.html               # Cell Ranger QC report
-```
-
-Key difference explained in Part 1:
-
-- **filtered_feature_bc_matrix/**: Cell Ranger already removed empty droplets and
-applied basic ambient RNA correction
-- **raw_feature_bc_matrix/**: No filtering – all droplets captured during sequencing
-
-Your choice:
-
-**Use raw → Perform Steps 4-5 (EmptyDrops + SoupX) for maximum control**\
-**Use filtered → Skip Steps 4-5, trust Cell Ranger’s filtering**\
+Also define vector objects to receive QC metrics
 
 ```{r step2}
-#-----------------------------------------------
-# STEP 2: Load 10x Genomics data
-#-----------------------------------------------
 
 # Define paths
-sample_name <- "Healthy_1"
-cellranger_output.dir <- file.path(base.dir,paste0("cellranger_output/",sample_name,"/outs"))
+sample_names <- c("Healthy_1",
+                  "Healthy_2",
+                  "Healthy_3",
+                  "Healthy_4",
+                  "Pre_Patient_1",
+                  "Pre_Patient_2",
+                  "Pre_Patient_3",
+                  "Pre_Patient_4",
+                  "Post_Patient_1",
+                  "Post_Patient_2",
+                  "Post_Patient_3",
+                  "Post_Patient_4") # corresponding to cellranger_output/{SAMPLE}/outs
 
-# OPTION A: Load RAW matrix (what this tutorial demonstrates)
-counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
- 
-# OPTION B: Load FILTERED matrix (alternative - skip Steps 4-5 if using this)
-# counts <- Read10X(data.dir = file.path(cellranger_output, "filtered_feature_bc_matrix"))
- 
-# Create Seurat object
-# If raw: contains ALL droplets (~20,000-100,000)
-# If filtered: contains only cells Cell Ranger called (~3,000-5,000)
-seurat_obj <- CreateSeuratObject(
-  counts = counts,
-  project = sample_name,
-  min.cells = 0,      # Don't filter genes yet
-  min.features = 0    # Don't filter cells yet - we'll do this properly
-)
- 
-# Add sample metadata (consistent with Part 1 tutorial)
-seurat_obj$sample_id <- "Healthy_1"
-seurat_obj$sra_id <- "SRR14575500"
-seurat_obj$condition <- "Healthy"
-seurat_obj$patient_id <- "Donor_1"
-seurat_obj$time_point <- NA  # Not applicable for healthy donors
- 
-# Quick check
-cat("Loaded:", ncol(seurat_obj), "droplets ×", nrow(seurat_obj), "genes\n")
-cat("(Most are empty - EmptyDrops will filter in Step 4)\n")
-```
-
-## Step 3: Initial Data Exploration
-
-Before filtering, let’s understand the raw data.
-
-```{r step3}
-#-----------------------------------------------
-# STEP 3: Initial data exploration
-#-----------------------------------------------
- 
-# Basic statistics
-cat("Total droplets:", ncol(seurat_obj), "\n")
-cat("Total genes:", nrow(seurat_obj), "\n")
- 
-# Quick statistics
-sparsity <- 1 - (sum(LayerData(seurat_obj, layer = "counts") > 0) / 
-                 (nrow(seurat_obj) * ncol(seurat_obj)))
-cat("Matrix sparsity:", round(sparsity * 100, 1), "%\n")
- 
-# UMI distribution - will be bimodal (empty droplets + real cells)
-umi_counts <- colSums(LayerData(seurat_obj, layer = "counts"))
-cat("Median UMI per droplet:", median(umi_counts), "\n")
-cat("Droplets with >500 UMI:", sum(umi_counts > 500), 
-    "(likely cells, will be validated by EmptyDrops)\n")
-
-```
-
-## Step 4: Empty Droplet Detection with DropletUtils
-
-Note: If you loaded the filtered matrix in Step 2, skip this step (and Step 5).
-Cell Ranger has already performed empty droplet removal. Jump directly to Step 6
-(Doublet Detection).
-
-Not every droplet captured by the 10x system contains a real cell. Some contain
-only ambient RNA from lysed cells. While Cell Ranger applies basic UMI-threshold
-filtering, EmptyDrops uses a more sophisticated statistical approach.
-
-### The Empty Droplet Problem
-
-Three types of droplets:
-
--   Cell-containing droplets: High UMI counts, diverse gene expression
--   Empty droplets: Low UMI counts, only ambient RNA
--   Damaged cells: Intermediate UMI counts (need filtering later)
--   The challenge: Rare cell types might have low RNA content, so simple UMI
-    thresholds can remove real cells.
-
-### Statistical Detection with EmptyDrops
-
-EmptyDrops uses a statistical approach:
-
--   Estimates the ambient RNA profile from low-count droplets
--   Tests each droplet: “Is this expression profile different from ambient RNA
-    alone?”
--   Assigns FDR (false discovery rate) to each droplet
--   Calls droplets as cells if FDR \< 0.01
--   **Note**: FDR for droplet call is a configurable parameter and could be
-    extracted from params specified in yaml frontmatter
-
-```{r step4}
-#-----------------------------------------------
-# STEP 4: Empty droplet detection
-#-----------------------------------------------
- 
-# Convert Seurat object to SingleCellExperiment for EmptyDrops
-# We already loaded the raw matrix in Step 2
-sce <- as.SingleCellExperiment(seurat_obj)
- 
-# Track initial droplet count for QC summary
-initial_droplet_count <- ncol(sce)
-initial_gene_count <- nrow(sce)
- 
-# Run EmptyDrops
-set.seed(100)
-empty_results <- emptyDrops(
-  m = counts(sce),
-  lower = 100,        # Droplets with <100 UMI assumed empty (for estimating ambient RNA)
-  niters = 10000,     # Iterations for p-value calculation
-  test.ambient = TRUE # Test if droplets differ from ambient RNA profile
-)
- 
-# Identify cells (FDR < 0.01)
-is_cell <- empty_results$FDR < 0.01
-is_cell[is.na(is_cell)] <- FALSE  # Treat NA as empty (very low UMI droplets)
-validated_barcodes <- colnames(sce)[is_cell]
- 
-# Brief feedback
-cat("Droplets tested:", ncol(sce), "\n")
-cat("Cells called:", sum(is_cell), 
-    "(", round(sum(is_cell)/ncol(sce)*100, 1), "%)\n")
-cat("Empty droplets removed:", sum(!is_cell), 
-    "(", round(sum(!is_cell)/ncol(sce)*100, 1), "%)\n")
- 
-# Visual QC - the critical check!
-empty_df <- data.frame(
-  total_umi = colSums(counts(sce)),
-  is_cell = is_cell
-)
- 
-p1 <- ggplot(empty_df, aes(x = log10(total_umi + 1), fill = is_cell)) +
-  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
-  scale_fill_manual(
-    values = c("TRUE" = "#2E86AB", "FALSE" = "#A23B72"),
-    labels = c("Empty Droplet", "Cell"),
-    name = "Classification"
-  ) +
-  labs(
-    title = "EmptyDrops: Cell vs Empty Droplet Detection",
-    subtitle = paste(sample_name, sum(is_cell), "cells called from", ncol(sce), "total droplets"),
-    x = "log10(UMI + 1)",
-    y = "Number of Droplets"
-  ) +
-  theme_classic() +
-  theme(plot.title = element_text(face = "bold", size = 14))
- 
-ggsave(file.path(qc.dir,paste0("plots/",sample_name,"_01_empty_droplets.png")), p1, width = 10, height = 6, dpi = 300)
- 
-# NOW filter the Seurat object to keep only validated cells
-# IMPORTANT: Save raw counts BEFORE filtering (needed for SoupX in Step 5)
-raw_counts_all_droplets <- LayerData(seurat_obj, layer = "counts")
- 
-seurat_obj <- subset(seurat_obj, cells = validated_barcodes)
- 
-cat("After EmptyDrops:", ncol(seurat_obj), "cells retained\n")
-```
-
-## Step 5: Ambient RNA Correction with SoupX
-
-Note: If you loaded the filtered matrix in Step 2, skip this step. Cell Ranger
-has already applied basic ambient RNA correction. Jump directly to Step 6
-(Doublet Detection).
-
-Even droplets containing cells are contaminated with ambient RNA—the “soup” of
-RNA floating in the suspension from lysed cells.
-
-### Why Ambient RNA Matters
-
-The problem:
-
--   Lysed cells release their RNA into the suspension
--   This ambient RNA enters all droplets
--   Creates false positive gene expression
--   Especially affects highly expressed genes (hemoglobin in blood, myelin in
-    brain)
-
-### Impact
-
--   Inflates marker gene expression
--   Creates false cell-type assignments
--   Reduces specificity of differential expression
--   Estimating and Removing Contamination
-
-Note: This step is optional. First check the contamination level – if it’s NULL
-or \<5% (**configurable**), you can skip correction.
-
-```{r step5}
-#-----------------------------------------------
-# STEP 5: Ambient RNA correction with SoupX
-#-----------------------------------------------
+empty_lower <- 100 # 100 UMIs necessary to be counted as non-empty droplet
+empty_niters <- 10000 # iterations for EmptyDrops p-value calculation
+empty_FDR <- 0.01 # FDR threshold for detecting non-empty droplets
 
 contamination_cutoff <- 0.05 # lowpass filter to decide whether to execute SoupX
 
-# Prepare SoupX channel
-# tod (table of droplets) = raw counts from ALL droplets (saved in Step 4)
-# toc (table of cells) = filtered counts from validated cells only
-tod <- raw_counts_all_droplets
-toc <- LayerData(seurat_obj, layer = "counts")
-sc <- SoupChannel(tod = tod, toc = toc, calcSoupProfile = TRUE)
- 
-# Quick standard Seurat clustering for contamination estimation; clusters needed by SoupX
-temp_obj <- seurat_obj
-temp_obj <- NormalizeData(temp_obj, verbose = FALSE)
-temp_obj <- FindVariableFeatures(temp_obj, nfeatures = 2000, verbose = FALSE)
-temp_obj <- ScaleData(temp_obj, verbose = FALSE)
-temp_obj <- RunPCA(temp_obj, npcs = 30, verbose = FALSE)
-temp_obj <- FindNeighbors(temp_obj, dims = 1:30, verbose = FALSE)
-temp_obj <- FindClusters(temp_obj, resolution = 0.8, verbose = FALSE)
-sc <- setClusters(sc, setNames(as.character(temp_obj$seurat_clusters), colnames(temp_obj)))
- 
-# Estimate contamination
-sc <- tryCatch({
-  autoEstCont(sc, verbose = FALSE)
-}, error = function(e) {
-  cat("Note: autoEstCont failed, setting contamination fraction to NULL\n")
-  sc$fit$rho <- NULL
-  return(sc)
-})
- 
-contamination_fraction <- sc$fit$rho
- 
-# Check contamination level
-cat("Contamination fraction:", 
-    ifelse(is.null(contamination_fraction), "NULL (very clean sample &/or SoupX autoEstCont failure)", 
-           paste0(round(contamination_fraction * 100, 2), "%")), "\n")
- 
-# Decision: Skip or correct based on contamination level
-if (is.null(contamination_fraction)) {
-  cat("→ Contamination is NULL\n")
-  cat("   Proceeding with original counts.\n")
-} else if (contamination_fraction < contamination_cutoff) {
-  cat("→ Contamination is",round(contamination_fraction * 100, 2),"% - SoupX cutoff is",round(contamination_cutoff * 100, 2),"%")
-  cat("   Proceeding with original counts.\n")
-} else {
-  cat("→ Contamination is",round(contamination_fraction * 100, 2),"% - SoupX cutoff is",round(contamination_cutoff * 100, 2),"%")
- 
-  # Apply correction
-  suppressWarnings({
-    corrected_counts <- adjustCounts(sc)
-  })
-  seurat_obj <- SetAssayData(seurat_obj, layer = "counts", new.data = corrected_counts)
-  cat("   ✓ SoupX correction applied\n")
-}
+initial_droplet_count <- vector(mode = "numeric", length = length(sample_names))
+initial_gene_count <- vector(mode = "numeric", length = length(sample_names))
+validated_barcode_count <- vector(mode = "numeric", length = length(sample_names))
 
-rm(sc,temp_obj,toc,tod)
+n_doublets <- vector(mode = "numeric", length = length(sample_names))
+doublet_rate <- vector(mode = "numeric", length = length(sample_names))
+cells_before_doublet_removal <- vector(mode = "numeric", length = length(sample_names))
+
+p1 <- list() # for collecting empty droplet ggplots
+p2 <- list() # for collecting doublet ggplots
+
 ```
 
-**When to Skip SoupX**: If contamination is NULL (estimation failed) or <5%, your sample is clean and correction is unnecessary. Values >5% indicate ambient RNA contamination worth correcting, especially in tissues prone to cell lysis (brain, tumor).
+## Execute loop for empty droplet, ambient RNA and doublet detection
 
-## Step 6: Doublet Detection with scDblFinder
+```{r loop1}
 
-Doublets occur when two cells are captured in the same droplet. They appear as artificial “intermediate” cell types and must be removed.
-
-### Understanding Doublets
-
-How doublets form:
-
-- 10x captures ~1% doublets per 1,000 cells loaded
-- Higher loading = more doublets (10,000 cells ~6 – 9% doublets)
-- Completely random—any two cell types can combine
-
-### Why they’re problematic
-
-- Create false “hybrid” cell types
-- Inflate cell counts
-- Confound trajectory analysis
-- Mess up differential expression
-
-```{r step6}
-#-----------------------------------------------
-# STEP 6: Doublet detection with scDblFinder
-#-----------------------------------------------
+for (i in seq_along(sample_names)) {
+  cellranger_output.dir <- file.path(base.dir,
+                                     paste0("cellranger_output/", sample_names[i], "/outs"))
+  counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
+  seurat_obj <- CreateSeuratObject(
+    counts = counts,
+    project = sample_names[i],
+    min.cells = 0,
+    min.features = 0
+  )
+  seurat_obj$sample_id <- sample_names[i]
+  
+  ### EmptyDroplet procedures
+  sce <- as.SingleCellExperiment(seurat_obj)
+  
+  # Track initial droplet count for QC summary
+  initial_droplet_count[i] <- ncol(sce)
+  initial_gene_count[i] <- nrow(sce)
+  
+  # Run EmptyDrops
+  set.seed(27)
+  empty_results <- emptyDrops(
+    m = counts(sce),
+    lower = empty_lower,
+    # Droplets with <100 UMI assumed empty (for estimating ambient RNA)
+    niters = empty_niters,
+    # Iterations for p-value calculation
+    test.ambient = TRUE # Test if droplets differ from ambient RNA profile
+  )
+  
+  # Identify cells (FDR < 0.01)
+  is_cell <- empty_results$FDR < empty_FDR
+  is_cell[is.na(is_cell)] <- FALSE  # Treat NA as empty (very low UMI droplets)
+  validated_barcodes <- colnames(sce)[is_cell]
+  validated_barcode_count[i] <- length(validated_barcodes)
+  
+  # Visual QC - the critical check!
+  empty_df <- data.frame(total_umi = colSums(counts(sce)), is_cell = is_cell)
+  
+  p1[[i]] <- ggplot(empty_df, aes(x = log10(total_umi + 1), fill = is_cell)) +
+    geom_histogram(bins = 50,
+                   alpha = 0.7,
+                   position = "identity") +
+    scale_fill_manual(
+      values = c("TRUE" = "#2E86AB", "FALSE" = "#A23B72"),
+      labels = c("Empty Droplet", "Cell"),
+      name = "Classification"
+    ) +
+    labs(
+      title = "EmptyDrops: Cell vs Empty Droplet Detection",
+      subtitle = paste(
+        sample_names[i],
+        sum(is_cell),
+        "cells called from",
+        ncol(sce),
+        "total droplets"
+      ),
+      x = "log10(UMI + 1)",
+      y = "Number of Droplets"
+    ) +
+    theme_classic() +
+    theme(plot.title = element_text(face = "bold", size = 14))
+  
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[i], "_01_empty_droplets.png")
+    ),
+    p1[i],
+    width = 10,
+    height = 6,
+    dpi = 300
+  )
+  
+  # Filter the Seurat object to keep only validated cells
+  # IMPORTANT: Save raw counts BEFORE filtering (needed for SoupX)
+  raw_counts_all_droplets <- LayerData(seurat_obj, layer = "counts")
+  
+  seurat_obj <- subset(seurat_obj, cells = validated_barcodes)
+  rm(sce)
+  
+  ### SoupX procedures
+  # Prepare SoupX channel
+  # tod (table of droplets) = raw counts from ALL droplets
+  # toc (table of cells) = filtered counts from validated cells only
+  tod <- raw_counts_all_droplets
+  toc <- LayerData(seurat_obj, layer = "counts")
+  sc <- SoupChannel(tod = tod,
+                    toc = toc,
+                    calcSoupProfile = TRUE)
+  
+  # Quick standard Seurat clustering for contamination estimation; clusters needed by SoupX
+  temp_obj <- seurat_obj
+  temp_obj <- NormalizeData(temp_obj, verbose = FALSE)
+  temp_obj <- FindVariableFeatures(temp_obj, nfeatures = 2000, verbose = FALSE)
+  temp_obj <- ScaleData(temp_obj, verbose = FALSE)
+  temp_obj <- RunPCA(temp_obj, npcs = 30, verbose = FALSE)
+  temp_obj <- FindNeighbors(temp_obj, dims = 1:30, verbose = FALSE)
+  temp_obj <- FindClusters(temp_obj, resolution = 0.8, verbose = FALSE)
+  sc <- setClusters(sc, setNames(
+    as.character(temp_obj$seurat_clusters),
+    colnames(temp_obj)
+  ))
+  
+  # Estimate contamination
+  sc <- tryCatch({
+    autoEstCont(sc, verbose = FALSE)
+  }, error = function(e) {
+    sc$fit$rho <- NULL # if autoEstCont fails
+    return(sc)
+  })
+  
+  contamination_fraction[i] <- sc$fit$rho
+  
+  # Decision: Skip or correct based on contamination level
+  if (!is.null(contamination_fraction) &&
+      contamination_fraction[i] < contamination_cutoff) {
+    # Apply correction
+    suppressWarnings({
+      corrected_counts <- adjustCounts(sc)
+    })
+    seurat_obj <- SetAssayData(seurat_obj, layer = "counts", new.data = corrected_counts)
+  }
+  
+  rm(sc, temp_obj, toc, tod)
+  
+  ### Doublet detection procedure (scDblFinder)
+  sce <- as.SingleCellExperiment(seurat_obj)
  
-# Join layers (if multiple samples in assay separated out into layers) and convert to SCE
-seurat_obj <- JoinLayers(seurat_obj)
-sce <- as.SingleCellExperiment(seurat_obj)
- 
-# Run scDblFinder (suppress expected warnings about empty layers and xgboost)
 set.seed(27)
+# Run scDblFinder (suppress expected warnings about empty layers and xgboost)
 suppressWarnings({
   sce <- scDblFinder(sce, dbr = NULL, verbose = FALSE)
 })
@@ -427,12 +245,11 @@ seurat_obj$doublet_class <- ifelse(sce$scDblFinder.class == "doublet", "Doublet"
 seurat_obj$doublet_score <- sce$scDblFinder.score
  
 # Brief feedback
-n_doublets <- sum(seurat_obj$doublet_class == "Doublet")
-doublet_rate <- n_doublets / ncol(seurat_obj) * 100
-cat("Doublets:", n_doublets, "(", round(doublet_rate, 1), "%)\n")
+n_doublets[i] <- sum(seurat_obj$doublet_class == "Doublet")
+doublet_rate[i] <- n_doublets[i] / ncol(seurat_obj) * 100
  
 # Track cells before doublet removal for QC summary
-cells_before_doublet_removal <- ncol(seurat_obj)
+cells_before_doublet_removal[i] <- ncol(seurat_obj)
  
 # Quick UMAP for visualization
 seurat_obj <- NormalizeData(seurat_obj, verbose = FALSE)
@@ -442,26 +259,26 @@ seurat_obj <- RunPCA(seurat_obj, npcs = 30, verbose = FALSE)
 seurat_obj <- RunUMAP(seurat_obj, dims = 1:30, verbose = FALSE)
  
 # Visualize doublets on UMAP
-p2 <- DimPlot(
+p2[[i]] <- DimPlot(
   seurat_obj,
   reduction = "umap",
   group.by = "doublet_class",
   cols = c("Singlet" = "#90E0EF", "Doublet" = "#EF233C"),
   pt.size = 1
 ) +
-  labs(title = paste0("Doublet Detection (", round(doublet_rate, 1), "%)")) +
+  labs(title = paste0("Doublet Detection (", round(doublet_rate[i], 1), "%)")) +
   theme(plot.title = element_text(face = "bold", size = 14))
  
-ggsave(file.path(qc.dir,paste0("plots/",sample_name,"_02_doublets_umap.png")), p2, width = 8, height = 7, dpi = 300)
+ggsave(file.path(qc.dir,paste0("plots/",sample_names[i],"_02_doublets_umap.png")), p2, width = 8, height = 7, dpi = 300)
  
 # Remove doublets
 seurat_obj <- subset(seurat_obj, subset = doublet_class == "Singlet")
-cat("After doublet removal:", ncol(seurat_obj), "cells\n")
+}
+
+saveRDS(seurat_obj, file = file.path(filt.dir,paste0(sample_names[i],"_qc_part1_filtered.rds")))
 ```
 
-**Note on Warnings**: scDblFinder may generate harmless warnings about empty Seurat layers (normal – it only needs raw counts) and xgboost parameter deprecation (package version mismatch). In the code above, these are suppressed with suppressWarnings() for cleaner output but don’t affect doublet detection accuracy.
 
-**Expected Doublet Rates**: For ~3,000-5,000 cells, expect 0.5-2% doublets. Rates >10% suggest problems with cell loading concentration or the doublet detector being too sensitive. Given that our example sample includes over 9,800 cells, a 10% rate is considered acceptable.
 
 ## Step 7: Cell-Level Quality Control: Visualization followed by Manual Threshold Setting
 
@@ -481,7 +298,7 @@ The % MT and % ribo filtering steps below are based on **human** gene symbols. F
 
 ### Step 7a: Unfiltered cells
 
-```{r step_7a, fig.width = 15, fig.height = 5}
+```{r step_7a, fig.width = 15, fig.height = 5, eval = FALSE}
 #-----------------------------------------------
 # STEP 7: Calculate QC metrics, visualize, and filter cells
 #-----------------------------------------------
@@ -550,7 +367,7 @@ cat("  • Aim to remove no more than 25% of cells \n\n")
 ```
 ### Step 7b: Set thresholds in the following step
 
-```{r step_7b, fig.width = 8, fig.height = 7}
+```{r step_7b, fig.width = 8, fig.height = 7, eval = FALSE}
 # For an example case - adjust if necessary
 nfeature_min <- 500    # Minimum genes per cell
 nfeature_max <- 5000   # Maximum genes (above this = likely doublets)
@@ -636,7 +453,7 @@ if (removal_pct > removal_upper_limit) {
 
 ### Step 7c: Implement filtering thresholds
 
-```{r step_7c}
+```{r step_7c, eval = FALSE}
 # Track cells before cell-level QC filtering for summary
 cells_before_cell_qc <- nrow(qc_df)
  
@@ -667,7 +484,7 @@ The % MT, % ribo filtering and % HB steps below are based on **human** gene symb
 
 ### Step 8a: Visualization first
 
-```{r step8a, fig.width = 8, fig.height = 5}
+```{r step8a, fig.width = 8, fig.height = 5, eval = FALSE}
 #-----------------------------------------------
 # STEP 8: Gene-level QC with detection threshold
 #-----------------------------------------------
@@ -724,7 +541,7 @@ cat("  • 3-10 cells minimum: Conservative (removes very rare genes)\n\n")
 
 ### Step 8b: Implement gene per % or # cell threshold
 
-```{r step_8b}
+```{r step_8b, eval = FALSE}
 min_pct_cells <- 0.1  # Gene must be in ≥0.1% of cells
 # Alternatively: min_cells <- 3  # Gene must be in ≥3 cells
  
@@ -750,7 +567,7 @@ cat("After gene filtering:", nrow(seurat_obj), "genes remaining\n")
 
 **Variable Features**: These genes show high variability across cells (not just high expression). They’re likely involved in defining cell types and states, making them most useful for downstream clustering and cell type identification (covered in the next tutorial).
 
-```{r step_9, fig.width - 10, fig.height = 7}
+```{r step_9, fig.width - 10, fig.height = 7, eval = FALSE}
 #-----------------------------------------------
 # STEP 9: Normalization and variable features
 #-----------------------------------------------
@@ -779,7 +596,7 @@ ggsave(file.path(qc.dir,paste0("plots/",sample_name,"_07_variable_features.png")
 
 ## Step 10: Export Filtered Cells and QC Summary
 
-```{r step_10}
+```{r step_10, eval = FALSE}
 #-----------------------------------------------
 # STEP 10: Save processed data and create summary
 #-----------------------------------------------

@@ -1,0 +1,61 @@
+---
+title: "ngs101_scRNAseq_walkthrough_2_QC"
+author: "Scot J Matkovich; Lei Guo"
+date: "2026-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries and data
+
+Primary source: https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-2-quality-control-and-cell-filtering
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load libraries and configure environment
+#-----------------------------------------------
+ 
+# Core single-cell analysis
+library(Seurat)              # Main scRNA-seq toolkit
+library(SeuratObject)        # Seurat object infrastructure
+ 
+# QC-specific packages
+library(DropletUtils)        # Empty droplet detection
+library(scDblFinder)         # Doublet detection
+library(SoupX)               # Ambient RNA correction
+library(SingleCellExperiment) # SCE objects
+ 
+# Visualization
+library(ggplot2)             # Custom plots when needed
+library(patchwork)           # Combine plots
+library(dplyr)               # Data manipulation
+ 
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+qc.dir <- file.path(base.dir,"qc_analysis")
+if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
+ 
+# Create output directories
+dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
+dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
+dir.create(file.path(qc.dir,"filtered_data"), showWarnings = FALSE)
+ 
+# Set random seed for reproducibility
+set.seed(27)
+ 
+# Verify Seurat 5 installation
+cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
+cat("R version:", R.version.string, "\n")
+cat("Working directory:", getwd(), "\n\n")
+ 
+# Check for Seurat 5 features
+if (packageVersion("Seurat") >= "5.0.0") {
+  cat("✓ Seurat 5 detected - layer-based architecture available\n")
+} else {
+  warning("Please upgrade to Seurat 5 for this tutorial")
+}
+```
+

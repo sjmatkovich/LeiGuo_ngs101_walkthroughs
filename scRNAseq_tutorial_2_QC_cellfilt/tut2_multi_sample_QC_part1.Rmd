@@ -56,10 +56,6 @@ dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
 
 # Set random seed for reproducibility
 set.seed(27)
- 
-# Verify Seurat 5 installation
-cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
-cat("R version:", R.version.string, "\n")
 ```
 
 ## Define sample paths and correction parameters
@@ -86,11 +82,13 @@ empty_lower <- 100 # 100 UMIs necessary to be counted as non-empty droplet
 empty_niters <- 10000 # iterations for EmptyDrops p-value calculation
 empty_FDR <- 0.01 # FDR threshold for detecting non-empty droplets
 
-contamination_cutoff <- 0.05 # lowpass filter to decide whether to execute SoupX
+ambient_cutoff <- 0.05 # lowpass filter to decide whether to execute SoupX
 
 initial_droplet_count <- vector(mode = "numeric", length = length(sample_names))
 initial_gene_count <- vector(mode = "numeric", length = length(sample_names))
 validated_barcode_count <- vector(mode = "numeric", length = length(sample_names))
+
+ambient_fraction <- vector(mode = "numeric", length = length(sample_names))
 
 n_doublets <- vector(mode = "numeric", length = length(sample_names))
 doublet_rate <- vector(mode = "numeric", length = length(sample_names))
@@ -106,6 +104,7 @@ p2 <- list() # for collecting doublet ggplots
 ```{r loop1}
 
 for (i in seq_along(sample_names)) {
+  cat("Starting QC part 1 for",sample_names[i])
   cellranger_output.dir <- file.path(base.dir,
                                      paste0("cellranger_output/", sample_names[i], "/outs"))
   counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
@@ -118,6 +117,7 @@ for (i in seq_along(sample_names)) {
   seurat_obj$sample_id <- sample_names[i]
   
   ### EmptyDroplet procedures
+  cat("EmptyDrops procedure")
   sce <- as.SingleCellExperiment(seurat_obj)
   
   # Track initial droplet count for QC summary
@@ -187,6 +187,7 @@ for (i in seq_along(sample_names)) {
   rm(sce)
   
   ### SoupX procedures
+  cat("SoupX procedure")
   # Prepare SoupX channel
   # tod (table of droplets) = raw counts from ALL droplets
   # toc (table of cells) = filtered counts from validated cells only
@@ -217,11 +218,15 @@ for (i in seq_along(sample_names)) {
     return(sc)
   })
   
-  contamination_fraction[i] <- sc$fit$rho
-  
+  if (!is.null(sc$fit$rho) && sc$fit_rho != "") {
+    ambient_fraction[i] <- sc$fit$rho
+  } else {
+    ambient_fraction[i] <- NA
+  }
+      
   # Decision: Skip or correct based on contamination level
-  if (!is.null(contamination_fraction) &&
-      contamination_fraction[i] < contamination_cutoff) {
+  if (!is.na(ambient_fraction[i]) &&
+      ambient_fraction[i] >= ambient_cutoff) {
     # Apply correction
     suppressWarnings({
       corrected_counts <- adjustCounts(sc)
@@ -229,56 +234,100 @@ for (i in seq_along(sample_names)) {
     seurat_obj <- SetAssayData(seurat_obj, layer = "counts", new.data = corrected_counts)
   }
   
-  rm(sc, temp_obj, toc, tod)
+  rm(sc, temp_obj, toc, tod, raw_counts_all_droplets)
   
   ### Doublet detection procedure (scDblFinder)
+  cat("Doublet dection with scDblFinder")
   sce <- as.SingleCellExperiment(seurat_obj)
- 
-set.seed(27)
-# Run scDblFinder (suppress expected warnings about empty layers and xgboost)
-suppressWarnings({
-  sce <- scDblFinder(sce, dbr = NULL, verbose = FALSE)
-})
- 
-# Extract results
-seurat_obj$doublet_class <- ifelse(sce$scDblFinder.class == "doublet", "Doublet", "Singlet")
-seurat_obj$doublet_score <- sce$scDblFinder.score
- 
-# Brief feedback
-n_doublets[i] <- sum(seurat_obj$doublet_class == "Doublet")
-doublet_rate[i] <- n_doublets[i] / ncol(seurat_obj) * 100
- 
-# Track cells before doublet removal for QC summary
-cells_before_doublet_removal[i] <- ncol(seurat_obj)
- 
-# Quick UMAP for visualization
-seurat_obj <- NormalizeData(seurat_obj, verbose = FALSE)
-seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures = 2000, verbose = FALSE)
-seurat_obj <- ScaleData(seurat_obj, verbose = FALSE)
-seurat_obj <- RunPCA(seurat_obj, npcs = 30, verbose = FALSE)
-seurat_obj <- RunUMAP(seurat_obj, dims = 1:30, verbose = FALSE)
- 
-# Visualize doublets on UMAP
-p2[[i]] <- DimPlot(
-  seurat_obj,
-  reduction = "umap",
-  group.by = "doublet_class",
-  cols = c("Singlet" = "#90E0EF", "Doublet" = "#EF233C"),
-  pt.size = 1
-) +
-  labs(title = paste0("Doublet Detection (", round(doublet_rate[i], 1), "%)")) +
-  theme(plot.title = element_text(face = "bold", size = 14))
- 
-ggsave(file.path(qc.dir,paste0("plots/",sample_names[i],"_02_doublets_umap.png")), p2, width = 8, height = 7, dpi = 300)
- 
-# Remove doublets
-seurat_obj <- subset(seurat_obj, subset = doublet_class == "Singlet")
+  
+  set.seed(27)
+  # Run scDblFinder (suppress expected warnings about empty layers and xgboost)
+  suppressWarnings({
+    sce <- scDblFinder(sce, dbr = NULL, verbose = FALSE)
+  })
+  
+  # Extract results
+  seurat_obj$doublet_class <- ifelse(sce$scDblFinder.class == "doublet", "Doublet", "Singlet")
+  seurat_obj$doublet_score <- sce$scDblFinder.score
+  
+  # Brief feedback
+  n_doublets[i] <- sum(seurat_obj$doublet_class == "Doublet")
+  doublet_rate[i] <- n_doublets[i] / ncol(seurat_obj) * 100
+  
+  # Track cells before doublet removal for QC summary
+  cells_before_doublet_removal[i] <- ncol(seurat_obj)
+  
+  # Quick UMAP for visualization
+  seurat_obj <- NormalizeData(seurat_obj, verbose = FALSE)
+  seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures = 2000, verbose = FALSE)
+  seurat_obj <- ScaleData(seurat_obj, verbose = FALSE)
+  seurat_obj <- RunPCA(seurat_obj, npcs = 30, verbose = FALSE)
+  suppressWarnings({
+    seurat_obj <- RunUMAP(seurat_obj, dims = 1:30, verbose = FALSE)
+  })
+  
+  # Visualize doublets on UMAP
+  p2[[i]] <- DimPlot(
+    seurat_obj,
+    reduction = "umap",
+    group.by = "doublet_class",
+    cols = c(
+      "Singlet" = "#90E0EF",
+      "Doublet" = "#EF233C"
+    ),
+    pt.size = 1
+  ) +
+    labs(title = paste0("Doublet Detection ",sample_names[i]," (", round(doublet_rate[i], 1), "%)")) +
+    theme(plot.title = element_text(face = "bold", size = 14))
+  
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[i], "_02_doublets_umap.png")
+    ),
+    p2,
+    width = 8,
+    height = 7,
+    dpi = 300
+  )
+  
+  # Remove doublets
+  seurat_obj <- subset(seurat_obj, subset = doublet_class == "Singlet")
+  
+  cat("Saving qc_part1_filtered",sample_names[i],"rds object")
+  saveRDS(seurat_obj,
+          file = file.path(filt.dir, paste0(
+    sample_names[i], "_qc_part1_filtered.rds"
+  )))
+  
+  rm(seurat_obj)
 }
 
-saveRDS(seurat_obj, file = file.path(filt.dir,paste0(sample_names[i],"_qc_part1_filtered.rds")))
 ```
 
+### Save out QC metric objects so far
 
+```{r save_QC_part1_metrics}
+
+qc_part1.file <- "qc_part1.RData"
+
+save(
+sample_names,
+empty_lower,
+empty_niters,
+ambient_cutoff,
+initial_droplet_count,
+initial_gene_count,
+validated_barcode_count,
+ambient_fraction,
+n_doublets,
+doublet_rate,
+cells_before_doublet_removal,
+p1,
+p2,
+file = file.path(qc.dir,"qc_metrics", qc_part1.file)
+)
+```
 
 ## Step 7: Cell-Level Quality Control: Visualization followed by Manual Threshold Setting
 
@@ -626,8 +675,8 @@ qc_summary <- data.frame(
   median_mt_pct = median(seurat_obj$percent.mt),
  
   # QC parameters
-  contamination_pct = ifelse(is.null(contamination_fraction), 0, 
-                             round(contamination_fraction * 100, 2)),
+  ambient_pct = ifelse(is.null(ambient_fraction), 0, 
+                             round(ambient_fraction * 100, 2)),
   doublet_rate_pct = round(doublet_rate, 2),
  
   # Filtering thresholds used
@@ -652,6 +701,21 @@ cat(paste0("  • ",filt.dir,"/",sample_name,"_qc_filtered.rds - Clean Seurat ob
 cat(paste0("  • ",qc.dir,"/qc_metrics/",sample_name,"_QC_summary.csv - Comprehensive QC summary\n"))
 cat(paste0("  • ",filt.dir,"/",sample_name,"_filt_cell_metadata.csv - Cell-level metadata\n"))
 
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"QC_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
 ```
 
 ## Best Practices: Essential QC Principles

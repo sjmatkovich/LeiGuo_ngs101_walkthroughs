@@ -104,7 +104,7 @@ p2 <- list() # for collecting doublet ggplots
 ```{r loop1}
 
 for (i in seq_along(sample_names)) {
-  cat("Starting QC part 1 for",sample_names[i])
+  cat("Starting QC part 1 for",sample_names[i],"\n")
   cellranger_output.dir <- file.path(base.dir,
                                      paste0("cellranger_output/", sample_names[i], "/outs"))
   counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
@@ -117,7 +117,7 @@ for (i in seq_along(sample_names)) {
   seurat_obj$sample_id <- sample_names[i]
   
   ### EmptyDroplet procedures
-  cat("EmptyDrops procedure")
+  cat("EmptyDrops procedure\n")
   sce <- as.SingleCellExperiment(seurat_obj)
   
   # Track initial droplet count for QC summary
@@ -187,7 +187,7 @@ for (i in seq_along(sample_names)) {
   rm(sce)
   
   ### SoupX procedures
-  cat("SoupX procedure")
+  cat("SoupX procedure\n")
   # Prepare SoupX channel
   # tod (table of droplets) = raw counts from ALL droplets
   # toc (table of cells) = filtered counts from validated cells only
@@ -237,7 +237,7 @@ for (i in seq_along(sample_names)) {
   rm(sc, temp_obj, toc, tod, raw_counts_all_droplets)
   
   ### Doublet detection procedure (scDblFinder)
-  cat("Doublet dection with scDblFinder")
+  cat("Doublet detection with scDblFinder\n")
   sce <- as.SingleCellExperiment(seurat_obj)
   
   set.seed(27)
@@ -294,7 +294,7 @@ for (i in seq_along(sample_names)) {
   # Remove doublets
   seurat_obj <- subset(seurat_obj, subset = doublet_class == "Singlet")
   
-  cat("Saving qc_part1_filtered",sample_names[i],"rds object")
+  cat("Saving qc_part1_filtered",sample_names[i],"rds object\n")
   saveRDS(seurat_obj,
           file = file.path(filt.dir, paste0(
     sample_names[i], "_qc_part1_filtered.rds"

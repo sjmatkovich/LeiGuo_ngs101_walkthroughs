@@ -188,7 +188,7 @@ median_genes <- NULL
 median_mt_pct <- NULL
 
 for (p in seq_along(sample_names)) {
-  cat("Re-reading cell-filtered Seurat object for", sample_names[p])
+  cat("Re-reading cell-filtered Seurat object for", sample_names[p],"\n")
   seurat_obj <- readRDS(file = file.path(filt.dir, paste0(
     sample_names[p], "_qc_part2_filtered.rds"
   )))
@@ -212,7 +212,7 @@ for (p in seq_along(sample_names)) {
       "\n")
   cat("Genes removed:\n")
   cat("  Low detection:",
-      sum(gene_qc_list[[p]]c$pct_cells_detected < min_pct_cells[p]),
+      sum(gene_qc_list[[p]]$pct_cells_detected < min_pct_cells[p]),
       "\n")
   cat("  Hemoglobin:", sum(gene_qc_list[[p]]$is_hb), "\n\n")
   
@@ -228,7 +228,7 @@ for (p in seq_along(sample_names)) {
   median_genes[p] <- median(seurat_obj$nFeature_RNA)
   median_mt_pct[p] <- median(seurat_obj$percent.mt)
   
-  write.csv(seurat_obj@meta.data, file.path(filt.dir,paste0(sample_name,"_filt_cell_metadata.csv")))
+  write.csv(seurat_obj@meta.data, file.path(filt.dir,paste0(sample_names[p],"_filt_cell_metadata.csv")))
   
   cat("Saving new qc_final_filtered Seurat object for",
       sample_names[p],
@@ -238,8 +238,12 @@ for (p in seq_along(sample_names)) {
   )))
   
   #-----------------------------------------------
-  # STEP 9: Normalization and variable features
+  # STEP 9: Normalization and variable features (first looks)
   #-----------------------------------------------
+  
+  ## The following steps perform initial normalization and HVG steps in Seurat objects
+  ## These won't be saved, facilitating later combination of the objects into one
+  ## (or multi-layer assay)
   
   # Log-normalize
   seurat_obj <- NormalizeData(
@@ -258,7 +262,7 @@ for (p in seq_along(sample_names)) {
   )
   
   top10 <- head(VariableFeatures(seurat_obj), 10)
-  cat("Top 10 variable genes:", paste(top10, collapse = ", "), "\n")
+  cat("Top 10 variable genes:", paste(top10, collapse = ", "), "\n\n")
   # Top 10 variable genes: IGLC2, IGKC, LYPD2, LINGO2, IGLC3, PTGDS, FCER1A, IGHM, BANK1, S100A9
   
   # Visualize variable features
@@ -283,7 +287,7 @@ for (p in seq_along(sample_names)) {
 }
 ```
 
-## Export QC Summary for all processed Seurat objects
+## Export QC summary for all processed Seurat objects
 
 ```{r step_10, eval = TRUE}
 #-----------------------------------------------
@@ -322,16 +326,16 @@ qc_summary <- data.frame(
   # Key metrics (from final filtered data)
   median_umi = median_umi,
   median_genes = median_genes,
-  median_mt_pct = median_mt_pct,
+  median_mt_pct = median_mt_pct
 )
  
 # Save comprehensive summary
 write.csv(qc_summary, file.path(qc.dir,paste0("qc_metrics/all_samples_QC_summary.csv")), row.names = FALSE)
 
 cat("Files created:\n")
-cat(paste0("  • ",filt.dir,"/_qc_part3_filtered.rds - Clean Seurat objects\n"))
 cat(paste0("  • ",qc.dir,"/qc_metrics/all_samples_QC_summary.csv - Comprehensive QC summary\n"))
-cat(paste0("  • ",filt.dir,"/_filt_cell_metadata.csv - Cell-level metadata per Seurat object\n"))
+cat(paste0("  • ",filt.dir,"/_qc_final_filtered.rds - Post-QC per-sample Seurat objects\n"))
+cat(paste0("  • ",filt.dir,"/_filt_cell_metadata.csv - Cell-level metadata for per-sample Seurat objects\n"))
 ```
 
 ### Save out final QC metric objects

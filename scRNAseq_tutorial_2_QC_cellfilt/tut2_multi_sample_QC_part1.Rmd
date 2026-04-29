@@ -1,6 +1,6 @@
 ---
 title: "ngs101_scRNAseq_walkthrough_2_QC - adapted to multiple samples"
-subtitle: "part 1 - empty droplets, ambient RNA, doublet detection"
+subtitle: "part 1 - empty droplets, ambient RNA, doublet detection, initial visualization"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 output:
@@ -173,7 +173,7 @@ for (i in seq_along(sample_names)) {
       qc.dir,
       paste0("plots/", sample_names[i], "_01_empty_droplets.png")
     ),
-    p1[i],
+    p1[[i]],
     width = 10,
     height = 6,
     dpi = 300
@@ -285,7 +285,7 @@ for (i in seq_along(sample_names)) {
       qc.dir,
       paste0("plots/", sample_names[i], "_02_doublets_umap.png")
     ),
-    p2,
+    p2[[i]],
     width = 8,
     height = 7,
     dpi = 300
@@ -323,15 +323,13 @@ ambient_fraction,
 n_doublets,
 doublet_rate,
 cells_before_doublet_removal,
-p1,
-p2,
 file = file.path(qc.dir,"qc_metrics", qc_part1.file)
 )
 ```
 
-## Step 7: Cell-Level Quality Control: Visualization followed by Manual Threshold Setting
+## Cell-Level Quality Control: Visualization (unfiltered cells)
 
-Now we filter individual cells based on their quality metrics. The key is visual inspection – look at the distributions and set biologically meaningful thresholds rather than relying on automatic statistical methods.
+Individual cells are filtered based on their quality metrics. The key is visual inspection – look at the distributions and set biologically meaningful thresholds rather than relying on automatic statistical methods.
 
 This is a three-step procedure:
 
@@ -339,26 +337,32 @@ This is a three-step procedure:
 - Parameter selection and visualization of impact on individual cells with before & after plots
 - Implement chosen filtering parameters
 
-### Note on filtering in this tutorial: Human data
+### Note on filtering in this walkthrough: Human data
 
 The % MT and % ribo filtering steps below are based on **human** gene symbols. For future workflow development, select according to species.
 
 **For snRNAseq work**, consider visualization of MALAT1 as an additional violin plot.
 
-### Step 7a: Unfiltered cells
+### Unfiltered cells visualization (loop)
 
-```{r step_7a, fig.width = 15, fig.height = 5, eval = FALSE}
+```{r step_7a, fig.width = 15, fig.height = 5, eval = TRUE}
 #-----------------------------------------------
 # STEP 7: Calculate QC metrics, visualize, and filter cells
 #-----------------------------------------------
- 
+
+for (j in seq_along(sample_names)) {
+  cat("Starting QC part 2 for",sample_names[j],"\n")
+  seurat_obj <- readRDS(file = file.path(filt.dir,
+                                         paste0(sample_names[j], "_qc_part1_filtered.rds")
+                                         )
+                        )
 # Calculate QC metrics
 seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
 seurat_obj[["percent.ribo"]] <- PercentageFeatureSet(seurat_obj, pattern = "^RP[SL]")
 seurat_obj$log10GenesPerUMI <- log10(seurat_obj$nFeature_RNA) / log10(seurat_obj$nCount_RNA)
  
 # Summary statistics to guide threshold setting
-cat("\nQC Metric Distributions:\n")
+cat("\nQC Metric Distributions for",sample_names[j],"\n")
 cat("nCount_RNA (UMI):\n")
 cat("  Median:", median(seurat_obj$nCount_RNA), 
     "| Q1-Q3:", quantile(seurat_obj$nCount_RNA, 0.25), "-", 
@@ -386,7 +390,7 @@ cat("  Median:", round(median(seurat_obj$percent.ribo), 2), "%\n")
   theme(plot.title = element_text(face = "bold"))
 )
  
-ggsave(file.path(qc.dir,paste0("plots/",sample_name,"_03_qc_violins.png")), p3, width = 16, height = 4, dpi = 300)
+ggsave(file.path(qc.dir,paste0("plots/",sample_names[j],"_03_qc_violins.png")), p3, width = 16, height = 4, dpi = 300)
  
 # Scatter plots showing metric relationships
 p4 <- FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
@@ -399,8 +403,16 @@ p6 <- FeatureScatter(seurat_obj, feature1 = "percent.mt", feature2 = "percent.ri
   labs(title = "Mitochondrial % vs Ribosomal %")
  
 (p_scatter <- p4 + p5 + p6)
-ggsave(file.path(qc.dir,paste0("plots/",sample_name,"_04_qc_scatter.png")), p_scatter, width = 15, height = 5, dpi = 300)
- 
+ggsave(file.path(qc.dir,paste0("plots/",sample_names[j],"_04_qc_scatter.png")), p_scatter, width = 15, height = 5, dpi = 300)
+
+cat("Re-saving qc_part1_filtered",sample_names[j],"rds object with additional metrics\n")
+  saveRDS(seurat_obj,
+          file = file.path(filt.dir, paste0(
+    sample_names[j], "_qc_part1_filtered.rds"
+  )))
+  rm(seurat_obj)
+}
+
 cat("\n→ EXAMINE plots/03_qc_violins.png and plots/04_qc_scatter.png\n")
 cat("→ Look for:\n")
 cat("   - Bimodal distributions (good vs bad cells)\n")
@@ -414,110 +426,9 @@ cat("  • percent.mt: PBMCs <10%, Brain <5%, Tumor <20%\n")
 cat("  • If distributions are bimodal, set threshold between modes\n")
 cat("  • Aim to remove no more than 25% of cells \n\n")
 ```
-### Step 7b: Set thresholds in the following step
 
-```{r step_7b, fig.width = 8, fig.height = 7, eval = FALSE}
-# For an example case - adjust if necessary
-nfeature_min <- 500    # Minimum genes per cell
-nfeature_max <- 5000   # Maximum genes (above this = likely doublets)
-ncount_min <- 800      # Minimum UMI per cell
-ncount_max <- 20000    # Maximum UMI (above this = likely doublets)
-mt_thresh <- 10        # Maximum mitochondrial % (adjust based on tissue)
 
-removal_upper_limit <- 30 # upper % limit on cell removal before warning flag
-removal_lower_limit <- 5  # lower % limit on cell removal before warning flag
 
-cat("Chosen thresholds:\n")
-cat("  nFeature_RNA: [", nfeature_min, ",", nfeature_max, "]\n")
-cat("  nCount_RNA: [", ncount_min, ",", ncount_max, "]\n")
-cat("  percent.mt: <", mt_thresh, "%\n\n")
-
-# Visualize thresholds on data
-qc_df <- data.frame(
-  nCount_RNA = seurat_obj$nCount_RNA,
-  nFeature_RNA = seurat_obj$nFeature_RNA,
-  percent.mt = seurat_obj$percent.mt
-)
- 
-qc_df$pass_qc <- (
-  qc_df$nCount_RNA >= ncount_min &
-  qc_df$nCount_RNA <= ncount_max &
-  qc_df$nFeature_RNA >= nfeature_min &
-  qc_df$nFeature_RNA <= nfeature_max &
-  qc_df$percent.mt < mt_thresh
-)
- 
-(p8 <- ggplot(qc_df, aes(x = log10(nCount_RNA + 1), y = log10(nFeature_RNA + 1), 
-                        color = pass_qc)) +
-  geom_point(alpha = 0.5, size = 1) +
-  geom_vline(xintercept = log10(c(ncount_min, ncount_max)), 
-             linetype = "dashed", color = "red") +
-  geom_hline(yintercept = log10(c(nfeature_min, nfeature_max)), 
-             linetype = "dashed", color = "red") +
-  scale_color_manual(values = c("TRUE" = "#06D6A0", "FALSE" = "#EF476F")) +
-  labs(
-    title = "Cell Filtering Thresholds",
-    subtitle = paste0(sum(qc_df$pass_qc), " cells pass QC (", 
-                      round(sum(qc_df$pass_qc)/nrow(qc_df)*100, 1), "%)"),
-    x = "log10(UMI + 1)",
-    y = "log10(Genes + 1)",
-    color = "Pass QC"
-  ) +
-  theme_classic()
-)
- 
-ggsave(file.path(qc.dir,paste0("plots/",sample_name,"_05_filtering_thresholds.png")), p8, width = 8, height = 7, dpi = 300)
- 
-# Report filtering impact
-removal_pct <- sum(!qc_df$pass_qc) / nrow(qc_df) * 100
-cat("Filtering impact:\n")
-cat("  Cells before:", nrow(qc_df), "\n")
-cat("  Cells passing QC:", sum(qc_df$pass_qc), "\n")
-cat("  Cells removed:", sum(!qc_df$pass_qc), 
-    "(", round(removal_pct, 1), "%)\n\n")
- 
-# Breakdown by criterion
-cat("Removal breakdown:\n")
-cat("  Low genes (<", nfeature_min, "):", 
-    sum(qc_df$nFeature_RNA < nfeature_min), "\n")
-cat("  High genes (>", nfeature_max, "):", 
-    sum(qc_df$nFeature_RNA > nfeature_max), "\n")
-cat("  High MT% (>", mt_thresh, "%):", 
-    sum(qc_df$percent.mt > mt_thresh), "\n\n")
- 
-# Sanity check on removal rate
-
-warn_icon <- '<img draggable="false" role="img" class="emoji" alt="⚠" src="https://s.w.org/images/core/emoji/17.0.2/svg/26a0.svg">'
-
-if (removal_pct > removal_upper_limit) {
-  cat(warn_icon, "WARNING: Removing", round(removal_pct, 1), "% of cells is high!\n")
-  cat("   Consider relaxing thresholds (especially MT%)\n\n")
-} else if (removal_pct < removal_lower_limit) {
-  cat(warn_icon, "WARNING: Only removing", round(removal_pct, 1), "% of cells is low.\n")
-  cat("   Check if you're retaining low-quality cells.\n\n")
-} else {
-  cat("✓ Removal rate of",round(removal_pct,1),"% is reasonable (typical: 10-25%)\n\n")
-}
-```
-
-### Step 7c: Implement filtering thresholds
-
-```{r step_7c, eval = FALSE}
-# Track cells before cell-level QC filtering for summary
-cells_before_cell_qc <- nrow(qc_df)
- 
-# Apply filters
-seurat_obj <- subset(
-  seurat_obj,
-  subset = nCount_RNA >= ncount_min &
-           nCount_RNA <= ncount_max &
-           nFeature_RNA >= nfeature_min &
-           nFeature_RNA <= nfeature_max &
-           percent.mt < mt_thresh
-)
- 
-cat("After filtering:", ncol(seurat_obj), "cells remaining\n")
-```
 
 ## Step 8: Gene-Level Quality Control
 

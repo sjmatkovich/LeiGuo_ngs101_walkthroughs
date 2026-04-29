@@ -1,0 +1,335 @@
+---
+title: "ngs101_scRNAseq_walkthrough_2_QC - adapted to multiple samples"
+subtitle: "part 3 - gene-level QC: choose thresholds, visualize effects"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-2-quality-control-and-cell-filtering>
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)              # Main scRNA-seq toolkit
+library(SeuratObject)        # Seurat object infrastructure
+ 
+# QC-specific packages
+library(DropletUtils)        # Empty droplet detection
+library(scDblFinder)         # Doublet detection
+library(SoupX)               # Ambient RNA correction
+library(SingleCellExperiment) # SCE objects
+ 
+# Visualization
+library(ggplot2)             # Custom plots when needed
+library(patchwork)           # Combine plots
+library(dplyr)               # Data manipulation
+ 
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
+if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
+filt.dir <- file.path(base.dir,"filtered_data")
+if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
+
+# Create output directories
+dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
+dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
+
+# Set random seed for reproducibility
+set.seed(27)
+
+qc_part1.file <- "qc_part1.RData"
+load(qc.dir,qc_part1.file)
+```
+
+## Cell-Level Quality Control: Visualization (after threshold setting)
+
+### Set thresholds
+
+In the code chunk below, filtering thresholds are given as vectors, whose elements should follow the same order as in the `sample_names` vector.
+
+An alternative would be to construct a table elsewhere with samples as rows and thresholds as columns, import as a data.frame, and then read from each data.frame column. To reduce the need for code rewriting later, the chunk below gathers together manually coded threshold vectors into a `threshold_df` data.frame and then extracts individual threshold values as needed. The alternative approach is thus to import `threshold_df` from .csv etc.
+
+Another reason to specify thresholds in a table is ease of adjustment after re-visualization.
+
+```{r step_7b_1, fig.width = 8, fig.height = 7, eval = FALSE}
+# For an example case - adjust if necessary
+nfeature_min <- rep(500, 12)    # Minimum genes per cell
+nfeature_max <- rep(5000, 12)   # Maximum genes (above this = likely doublets)
+ncount_min <- rep(800, 12)      # Minimum UMI per cell
+ncount_max <- rep(20000, 12)    # Maximum UMI (above this = likely doublets)
+mt_thresh <- rep(10, 12)        # Maximum mitochondrial % (adjust based on tissue)
+
+removal_upper_limit <- rep(30, 12) # upper % limit on cell removal before warning flag
+removal_lower_limit <- rep(5, 12)  # lower % limit on cell removal before warning flag
+
+threshold_df <- data.frame(sample_names = sample_names,
+                           nfeature_min = nfeature_min,
+                           nfeature_max = nfeature_max,
+                           ncount_min = ncount_min,
+                           ncount_max = ncount_max,
+                           mt_thresh = mt_thresh,
+                           removal_upper_limit = removal_upper_limit,
+                           removal_lower_limit = removal_lower_limit)
+```
+
+### Visualize effect of thresholds (loop)
+
+```{r step_7b_2, fig.width = 8, fig.height = 7, eval = FALSE}
+
+qc_list <- list()
+removal_pct <- NULL
+warn_icon <- '<img draggable="false" role="img" class="emoji" alt="⚠" src="https://s.w.org/images/core/emoji/17.0.2/svg/26a0.svg">'
+
+for (k in seq_along(sample_names)) {
+  cat("Chosen thresholds for", sample_names[k], "\n")
+  cat(
+    "  nFeature_RNA: [",
+    threshold_df$nfeature_min[k],
+    ",",
+    threshold_df$nfeature_max[k],
+    "]\n"
+  )
+  cat("  nCount_RNA: [",
+      threshold_df$ncount_min[k],
+      ",",
+      threshold_df$ncount_max[k],
+      "]\n")
+  cat("  percent.mt: <", threshold_df$mt_thresh[k], "%\n\n")
+  
+  cat("Re-reading Seurat object for", sample_names[k])
+  seurat_obj <- readRDS(file = file.path(filt.dir, paste0(
+    sample_names[k], "_qc_part1_filtered.rds"
+  )))
+  
+  cat("Generating filtering visualizations for",sample_names[k],"\n")
+  # Visualize thresholds on data
+  
+  qc_list[[k]] <- data.frame(
+    nCount_RNA = seurat_obj$nCount_RNA,
+    nFeature_RNA = seurat_obj$nFeature_RNA,
+    percent.mt = seurat_obj$percent.mt
+  )
+  names(qc_list)[k] <- sample_names[k]
+  
+  qc_list[[k]]$pass_qc <- (
+    qc_list[[k]]$nCount_RNA >= threshold_df$ncount_min[k] &
+      qc_list[[k]]$nCount_RNA <= threshold_df$ncount_max[k] &
+      qc_list[[k]]$nFeature_RNA >= threshold_df$nfeature_min[k] &
+      qc_list[[k]]$nFeature_RNA <= threshold_df$nfeature_max[k] &
+      qc_list[[k]]$percent.mt < threshold_df$mt_thresh[k]
+  )
+  (
+    p8 <- ggplot(qc_list[[k]], aes(
+      x = log10(nCount_RNA + 1),
+      y = log10(nFeature_RNA + 1),
+      color = pass_qc
+    )) +
+      geom_point(alpha = 0.5, size = 1) +
+      geom_vline(
+        xintercept = log10(c(
+          threshold_df$ncount_min[k], threshold_df$ncount_max[k]
+        )),
+        linetype = "dashed",
+        color = "red"
+      ) +
+      geom_hline(
+        yintercept = log10(c(
+          threshold_df$nfeature_min[k], threshold_df$nfeature_max[k]
+        )),
+        linetype = "dashed",
+        color = "red"
+      ) +
+      scale_color_manual(values = c(
+        "TRUE" = "#06D6A0", "FALSE" = "#EF476F"
+      )) +
+      labs(
+        title = "Cell Filtering Thresholds",
+        subtitle = paste0(
+          sum(qc_list[[k]]$pass_qc),
+          " cells pass QC (",
+          round(sum(qc_list[[k]]$pass_qc) / nrow(qc_list[[k]]) *
+                  100, 1),
+          "%)"
+        ),
+        x = "log10(UMI + 1)",
+        y = "log10(Genes + 1)",
+        color = "Pass QC"
+      ) +
+      theme_classic()
+  )
+  
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[k], "_05_filtering_thresholds.png")
+    ),
+    p8,
+    width = 8,
+    height = 7,
+    dpi = 300
+  )
+  
+  # Report filtering impact
+  removal_pct[k] <- sum(!qc_list[[k]]$pass_qc) / nrow(qc_list[[k]]) * 100
+  cat("Filtering impact on sample", sample_names[k], "\n")
+  cat("  Cells before:", nrow(qc_list[[k]]), "\n")
+  cat("  Cells passing QC:", sum(qc_list[[k]]$pass_qc), "\n")
+  cat("  Cells removed:",
+      sum(!qc_list[[k]]$pass_qc),
+      "(",
+      round(removal_pct[k], 1),
+      "%)\n\n")
+  
+  # Breakdown by criterion
+  cat("Removal breakdown for sample", sample_names[k], "\n")
+  cat(
+    "  Low genes (<",
+    threshold_df$nfeature_min[k],
+    "):",
+    sum(qc_list[[k]]$nFeature_RNA < threshold_df$nfeature_min[k]),
+    "\n"
+  )
+  cat(
+    "  High genes (>",
+    threshold_df$nfeature_max[k],
+    "):",
+    sum(qc_list[[k]]$nFeature_RNA > threshold_df$nfeature_max[k]),
+    "\n"
+  )
+  cat(
+    "  High MT% (>",
+    threshold_df$mt_thresh[k],
+    "%):",
+    sum(qc_list[[k]]$percent.mt > threshold_df$mt_thresh[k]),
+    "\n\n"
+  )
+  
+  # Sanity check on removal rate
+  if (removal_pct[k] > threshold_df$removal_upper_limit[k]) {
+    cat(warn_icon,
+        "WARNING: Removing",
+        round(removal_pct[k], 1),
+        "% of cells is high!\n")
+    cat("   Consider relaxing thresholds (especially MT%)\n\n")
+  } else if (removal_pct[k] < threshold_df$removal_lower_limit[k]) {
+    cat(warn_icon,
+        "WARNING: Only removing",
+        round(removal_pct, 1),
+        "% of cells is low.\n")
+    cat("   Check if you're retaining low-quality cells.\n\n")
+  } else {
+    cat("✓ Removal rate of",
+        round(removal_pct[k], 1),
+        "% is reasonable (typical: 10-25%)\n\n")
+  }
+}
+```
+
+### Save out QC metric objects generated during threshold setting
+
+Outputs gathered into `qc_part2.RData` object
+
+```{r save_qc_part2, eval = TRUE}
+qc_part2.file <- "qc_part2.RData"
+
+save(
+sample_names,
+threshold_df,
+qc_list,
+removal_pct,
+file = file.path(qc.dir,"qc_metrics", qc_part2.file)
+)
+```
+
+## Re-import previous QC metric files if needed
+
+Default is `eval = FALSE`
+
+```{r re-import_previous_QC_part2_metrics, eval = FALSE}
+qc_part2.file <- "qc_part2.RData"
+load(file = file.path(qc.dir,"qc_metrics", qc_part2.file))
+```
+
+## Cell-Level Quality Control: Implement filtering thresholds
+
+Inspect visualizations and metrics above, and alter any entries in `threshold_df` for `threshold_df_final` in section below
+
+```{r prep_threshold_final, eval = TRUE}
+
+## Make any alterations necessary within threshold_df_final based on visualizing QC parameters
+threshold_df_final <- threshold_df
+
+```
+
+### Implement chosen thresholds on Seurat objects
+
+Run this section (set `eval = TRUE`) only after performing above steps
+
+```{r implement_cell_thresholds, eval = FALSE}
+
+cells_before_cell_qc <- NULL
+
+for (m in seq_along(sample_names)) {
+  
+ # Track cells before cell-level QC filtering for summary
+cells_before_cell_qc[m] <- nrow(qc_list[[m]])
+ 
+# Apply filters
+cat("Re-reading Seurat object for",sample_names[m],"\n")
+  seurat_obj <- readRDS(file = file.path(filt.dir, paste0(
+    sample_names[m], "_qc_part1_filtered.rds"
+  )))
+seurat_obj <- subset(
+  seurat_obj,
+  subset = nCount_RNA >= threshold_df_final$ncount_min[m] &
+           nCount_RNA <= threshold_df_final$ncount_max[m] &
+           nFeature_RNA >= threshold_df_final$nfeature_min[m] &
+           nFeature_RNA <= threshold_df_final$nfeature_max[m] &
+           percent.mt < threshold_df_final$mt_thresh[m]
+)
+cat("Before filtering:", nrow(qc_list[[m]]), "cells") 
+cat("After filtering:", ncol(seurat_obj), "cells remaining\n") 
+cat("Saving new qc_part2_filtered Seurat object for",sample_names[m],"\n")
+  saveRDS(seurat_obj,
+          file = file.path(filt.dir, paste0(
+    sample_names[m], "_qc_part2_filtered.rds"
+  )))
+  rm(seurat_obj) 
+}
+
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"QC_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

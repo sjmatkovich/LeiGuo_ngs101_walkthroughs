@@ -51,213 +51,111 @@ filt.dir <- file.path(base.dir,"filtered_data")
 if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
 
 # Create output directories
-dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
-dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
+if (!dir.exists(file.path(qc.dir,"plots"))) dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
+if (!dir.exists(file.path(qc.dir,"qc_metrics"))) dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
 
 # Set random seed for reproducibility
 set.seed(27)
 
 qc_part1.file <- "qc_part1.RData"
-load(qc.dir,qc_part1.file)
+load(file.path(qc.dir,"qc_metrics",qc_part1.file))
+
+qc_part2b.file <- "qc_part2b.RData"
+load(file.path(qc.dir,"qc_metrics",qc_part2b.file))
 ```
 
-## Cell-Level Quality Control: Visualization (after threshold setting)
+## Gene-Level Quality Control: Visualization
 
-### Set thresholds
+After filtering cells, genes are filtered based on how widely they’re detected across cells.
 
-In the code chunk below, filtering thresholds are given as vectors, whose elements should follow the same order as in the `sample_names` vector.
+**Why Remove Hemoglobin?** In PBMC samples, hemoglobin genes (HBA1, HBA2, HBB) are typically from contaminating red blood cells during sample preparation, not true expression in PBMCs.
 
-An alternative would be to construct a table elsewhere with samples as rows and thresholds as columns, import as a data.frame, and then read from each data.frame column. To reduce the need for code rewriting later, the chunk below gathers together manually coded threshold vectors into a `threshold_df` data.frame and then extracts individual threshold values as needed. The alternative approach is thus to import `threshold_df` from .csv etc.
+**Detection Threshold**: The percentage-based approach (e.g., 0.1% of cells) scales with dataset size. For 5,000 cells, 0.1% = 5 cells. This is more robust than fixed “3 cells” cutoffs when analyzing datasets of varying sizes.
 
-Another reason to specify thresholds in a table is ease of adjustment after re-visualization.
+### Note on filtering in this tutorial: Human data
 
-```{r step_7b_1, fig.width = 8, fig.height = 7, eval = FALSE}
-# For an example case - adjust if necessary
-nfeature_min <- rep(500, 12)    # Minimum genes per cell
-nfeature_max <- rep(5000, 12)   # Maximum genes (above this = likely doublets)
-ncount_min <- rep(800, 12)      # Minimum UMI per cell
-ncount_max <- rep(20000, 12)    # Maximum UMI (above this = likely doublets)
-mt_thresh <- rep(10, 12)        # Maximum mitochondrial % (adjust based on tissue)
+The % MT, % ribo filtering and % HB steps below are based on **human** gene symbols. For future workflow development, select according to species.
 
-removal_upper_limit <- rep(30, 12) # upper % limit on cell removal before warning flag
-removal_lower_limit <- rep(5, 12)  # lower % limit on cell removal before warning flag
+### Visualization prior to filtering (loop)
 
-threshold_df <- data.frame(sample_names = sample_names,
-                           nfeature_min = nfeature_min,
-                           nfeature_max = nfeature_max,
-                           ncount_min = ncount_min,
-                           ncount_max = ncount_max,
-                           mt_thresh = mt_thresh,
-                           removal_upper_limit = removal_upper_limit,
-                           removal_lower_limit = removal_lower_limit)
-```
+```{r step8a, fig.width = 8, fig.height = 5, eval = TRUE}
+#-----------------------------------------------
+# STEP 8: Gene-level QC with detection threshold
+#-----------------------------------------------
 
-### Visualize effect of thresholds (loop)
+gene_qc_list <- list()
 
-```{r step_7b_2, fig.width = 8, fig.height = 7, eval = FALSE}
+for (n in seq_along(sample_names)) {
 
-qc_list <- list()
-removal_pct <- NULL
-warn_icon <- '<img draggable="false" role="img" class="emoji" alt="⚠" src="https://s.w.org/images/core/emoji/17.0.2/svg/26a0.svg">'
-
-for (k in seq_along(sample_names)) {
-  cat("Chosen thresholds for", sample_names[k], "\n")
-  cat(
-    "  nFeature_RNA: [",
-    threshold_df$nfeature_min[k],
-    ",",
-    threshold_df$nfeature_max[k],
-    "]\n"
-  )
-  cat("  nCount_RNA: [",
-      threshold_df$ncount_min[k],
-      ",",
-      threshold_df$ncount_max[k],
-      "]\n")
-  cat("  percent.mt: <", threshold_df$mt_thresh[k], "%\n\n")
-  
-  cat("Re-reading Seurat object for", sample_names[k])
+  cat("Re-reading cell-filtered Seurat object for", sample_names[n],"\n")
   seurat_obj <- readRDS(file = file.path(filt.dir, paste0(
-    sample_names[k], "_qc_part1_filtered.rds"
+    sample_names[n], "_qc_part2_filtered.rds"
   )))
-  
-  cat("Generating filtering visualizations for",sample_names[k],"\n")
-  # Visualize thresholds on data
-  
-  qc_list[[k]] <- data.frame(
-    nCount_RNA = seurat_obj$nCount_RNA,
-    nFeature_RNA = seurat_obj$nFeature_RNA,
-    percent.mt = seurat_obj$percent.mt
-  )
-  names(qc_list)[k] <- sample_names[k]
-  
-  qc_list[[k]]$pass_qc <- (
-    qc_list[[k]]$nCount_RNA >= threshold_df$ncount_min[k] &
-      qc_list[[k]]$nCount_RNA <= threshold_df$ncount_max[k] &
-      qc_list[[k]]$nFeature_RNA >= threshold_df$nfeature_min[k] &
-      qc_list[[k]]$nFeature_RNA <= threshold_df$nfeature_max[k] &
-      qc_list[[k]]$percent.mt < threshold_df$mt_thresh[k]
-  )
-  (
-    p8 <- ggplot(qc_list[[k]], aes(
-      x = log10(nCount_RNA + 1),
-      y = log10(nFeature_RNA + 1),
-      color = pass_qc
-    )) +
-      geom_point(alpha = 0.5, size = 1) +
-      geom_vline(
-        xintercept = log10(c(
-          threshold_df$ncount_min[k], threshold_df$ncount_max[k]
-        )),
-        linetype = "dashed",
-        color = "red"
-      ) +
-      geom_hline(
-        yintercept = log10(c(
-          threshold_df$nfeature_min[k], threshold_df$nfeature_max[k]
-        )),
-        linetype = "dashed",
-        color = "red"
-      ) +
-      scale_color_manual(values = c(
-        "TRUE" = "#06D6A0", "FALSE" = "#EF476F"
-      )) +
-      labs(
-        title = "Cell Filtering Thresholds",
-        subtitle = paste0(
-          sum(qc_list[[k]]$pass_qc),
-          " cells pass QC (",
-          round(sum(qc_list[[k]]$pass_qc) / nrow(qc_list[[k]]) *
-                  100, 1),
-          "%)"
-        ),
-        x = "log10(UMI + 1)",
-        y = "log10(Genes + 1)",
-        color = "Pass QC"
-      ) +
-      theme_classic()
-  )
-  
-  ggsave(
-    file.path(
-      qc.dir,
-      paste0("plots/", sample_names[k], "_05_filtering_thresholds.png")
-    ),
-    p8,
-    width = 8,
-    height = 7,
-    dpi = 300
-  )
-  
-  # Report filtering impact
-  removal_pct[k] <- sum(!qc_list[[k]]$pass_qc) / nrow(qc_list[[k]]) * 100
-  cat("Filtering impact on sample", sample_names[k], "\n")
-  cat("  Cells before:", nrow(qc_list[[k]]), "\n")
-  cat("  Cells passing QC:", sum(qc_list[[k]]$pass_qc), "\n")
-  cat("  Cells removed:",
-      sum(!qc_list[[k]]$pass_qc),
-      "(",
-      round(removal_pct[k], 1),
-      "%)\n\n")
-  
-  # Breakdown by criterion
-  cat("Removal breakdown for sample", sample_names[k], "\n")
-  cat(
-    "  Low genes (<",
-    threshold_df$nfeature_min[k],
-    "):",
-    sum(qc_list[[k]]$nFeature_RNA < threshold_df$nfeature_min[k]),
-    "\n"
-  )
-  cat(
-    "  High genes (>",
-    threshold_df$nfeature_max[k],
-    "):",
-    sum(qc_list[[k]]$nFeature_RNA > threshold_df$nfeature_max[k]),
-    "\n"
-  )
-  cat(
-    "  High MT% (>",
-    threshold_df$mt_thresh[k],
-    "%):",
-    sum(qc_list[[k]]$percent.mt > threshold_df$mt_thresh[k]),
-    "\n\n"
-  )
-  
-  # Sanity check on removal rate
-  if (removal_pct[k] > threshold_df$removal_upper_limit[k]) {
-    cat(warn_icon,
-        "WARNING: Removing",
-        round(removal_pct[k], 1),
-        "% of cells is high!\n")
-    cat("   Consider relaxing thresholds (especially MT%)\n\n")
-  } else if (removal_pct[k] < threshold_df$removal_lower_limit[k]) {
-    cat(warn_icon,
-        "WARNING: Only removing",
-        round(removal_pct, 1),
-        "% of cells is low.\n")
-    cat("   Check if you're retaining low-quality cells.\n\n")
-  } else {
-    cat("✓ Removal rate of",
-        round(removal_pct[k], 1),
-        "% is reasonable (typical: 10-25%)\n\n")
-  }
+
+  # Calculate gene detection
+counts_matrix <- LayerData(seurat_obj, layer = "counts")
+gene_detection <- rowSums(counts_matrix > 0)
+ 
+gene_qc_list[[n]] <- data.frame(
+  gene = rownames(seurat_obj),
+  n_cells_detected = gene_detection,
+  pct_cells_detected = (gene_detection / ncol(seurat_obj)) * 100,
+  is_mt = grepl("^MT-", rownames(seurat_obj)),
+  is_ribo = grepl("^RP[SL]", rownames(seurat_obj)),
+  is_hb = grepl("^HB[AB]", rownames(seurat_obj))
+)
+names(gene_qc_list)[n] <- sample_names[n]
+
+cat("Total genes:", nrow(gene_qc_list[[n]]), "\n")
+cat("MT genes:", sum(gene_qc_list[[n]]$is_mt), 
+    "| Ribo genes:", sum(gene_qc_list[[n]]$is_ribo), 
+    "| Hb genes:", sum(gene_qc_list[[n]]$is_hb), "\n\n")
+ 
+# Visualize gene detection
+(p9 <- ggplot(gene_qc_list[[n]], aes(x = pct_cells_detected)) +
+  geom_histogram(bins = 50, fill = "#118AB2", alpha = 0.7) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  labs(
+    title = "Gene Detection Across Cells",
+    subtitle = "Red line: 0.1% of cells threshold",
+    x = "% of Cells Expressing Gene (log scale)",
+    y = "Number of Genes"
+  ) +
+  theme_classic()
+)
+ 
+ggsave(file.path(qc.dir,paste0("plots/",sample_names[n],"_06_gene_detection.png")), p9, width = 8, height = 5, dpi = 300)
+
 }
+
+cat("→ EXAMINE plots/06_gene_detection.png\n")
+cat("   Choose threshold based on where detection drops off\n\n")
+ 
+# Set filtering threshold - ADJUST BASED ON YOUR DATA
+# Common approaches:
+#   - 0.1% of cells (very lenient, keeps most genes)
+#   - 1% of cells (moderate, standard approach)
+#   - 3 cells minimum (absolute count, conservative)
+
+cat("Threshold options:\n")
+cat("  • 0.1% of cells: Lenient (keeps rare cell type markers)\n")
+cat("  • 1% of cells: Standard (balances detection vs noise)\n")
+cat("  • 3-10 cells minimum: Conservative (removes very rare genes)\n\n")
+ 
 ```
 
-### Save out QC metric objects generated during threshold setting
+### Save out QC metric objects generated before threshold setting
 
-Outputs gathered into `qc_part2.RData` object
+Outputs gathered into `qc_part3.RData` object
 
-```{r save_qc_part2, eval = TRUE}
-qc_part2.file <- "qc_part2.RData"
+```{r save_qc_part3, eval = TRUE}
+qc_part3.file <- "qc_part3.RData"
 
 save(
 sample_names,
-threshold_df,
-qc_list,
-removal_pct,
-file = file.path(qc.dir,"qc_metrics", qc_part2.file)
+gene_qc_list,
+file = file.path(qc.dir,"qc_metrics", qc_part3.file)
 )
 ```
 
@@ -265,58 +163,208 @@ file = file.path(qc.dir,"qc_metrics", qc_part2.file)
 
 Default is `eval = FALSE`
 
-```{r re-import_previous_QC_part2_metrics, eval = FALSE}
-qc_part2.file <- "qc_part2.RData"
-load(file = file.path(qc.dir,"qc_metrics", qc_part2.file))
+```{r re-import_previous_QC_part3_metrics, eval = TRUE}
+qc_part3.file <- "qc_part3.RData"
+load(file = file.path(qc.dir,"qc_metrics", qc_part3.file))
 ```
 
-## Cell-Level Quality Control: Implement filtering thresholds
+## Gene-Level Quality Control: Implement gene per % or # cell threshold
 
-Inspect visualizations and metrics above, and alter any entries in `threshold_df` for `threshold_df_final` in section below
+Set up a `min_pct_cells` vector to implement separate cutoffs for each Seurat object in `sample_names`
 
-```{r prep_threshold_final, eval = TRUE}
+Don't run the following implementation section prior to inspecting gene-level QC plots and choosing cutoffs.
 
-## Make any alterations necessary within threshold_df_final based on visualizing QC parameters
-threshold_df_final <- threshold_df
+After implementing gene-level cutoffs, plots are generated for **Variable Features**. These genes show high variability across cells (not just high expression). They’re likely involved in defining cell types and states, making them most useful for downstream clustering and cell type identification.
 
-```
+```{r step_8b_9, fig.width = 10, fig.height = 7,eval = TRUE}
 
-### Implement chosen thresholds on Seurat objects
+min_pct_cells <- rep(0.1, 12)  # Gene must be in ≥0.1% of cells
+# Alternatively: min_cells <- 3  # Gene must be in ≥3 cells
 
-Run this section (set `eval = TRUE`) only after performing above steps
+after_cell_qc <- NULL
+final_gene_count <- NULL
+median_umi <- NULL
+median_genes <- NULL
+median_mt_pct <- NULL
 
-```{r implement_cell_thresholds, eval = FALSE}
-
-cells_before_cell_qc <- NULL
-
-for (m in seq_along(sample_names)) {
-  
- # Track cells before cell-level QC filtering for summary
-cells_before_cell_qc[m] <- nrow(qc_list[[m]])
- 
-# Apply filters
-cat("Re-reading Seurat object for",sample_names[m],"\n")
+for (p in seq_along(sample_names)) {
+  cat("Re-reading cell-filtered Seurat object for", sample_names[p])
   seurat_obj <- readRDS(file = file.path(filt.dir, paste0(
-    sample_names[m], "_qc_part1_filtered.rds"
+    sample_names[p], "_qc_part2_filtered.rds"
   )))
-seurat_obj <- subset(
-  seurat_obj,
-  subset = nCount_RNA >= threshold_df_final$ncount_min[m] &
-           nCount_RNA <= threshold_df_final$ncount_max[m] &
-           nFeature_RNA >= threshold_df_final$nfeature_min[m] &
-           nFeature_RNA <= threshold_df_final$nfeature_max[m] &
-           percent.mt < threshold_df_final$mt_thresh[m]
-)
-cat("Before filtering:", nrow(qc_list[[m]]), "cells") 
-cat("After filtering:", ncol(seurat_obj), "cells remaining\n") 
-cat("Saving new qc_part2_filtered Seurat object for",sample_names[m],"\n")
-  saveRDS(seurat_obj,
-          file = file.path(filt.dir, paste0(
-    sample_names[m], "_qc_part2_filtered.rds"
+  
+  cat("Setting gene filter threshold for", sample_names[p], "\n")
+  cat("  Minimum detection: ≥", min_pct_cells[p], "% of cells\n")
+  cat(
+    "  (Equivalent to ≥",
+    ceiling(ncol(seurat_obj) * min_pct_cells[p] / 100),
+    "cells with current dataset)\n\n"
+  )
+  
+  # Filter genes
+  genes_to_keep <- (gene_qc_list[[p]]$pct_cells_detected >= min_pct_cells[p]) &
+    !gene_qc_list[[p]]$is_hb
+  
+  cat("Genes passing filter:",
+      sum(genes_to_keep),
+      "/",
+      nrow(gene_qc_list[[p]]),
+      "\n")
+  cat("Genes removed:\n")
+  cat("  Low detection:",
+      sum(gene_qc_list[[p]]c$pct_cells_detected < min_pct_cells[p]),
+      "\n")
+  cat("  Hemoglobin:", sum(gene_qc_list[[p]]$is_hb), "\n\n")
+  
+  seurat_obj <- seurat_obj[gene_qc_list[[p]]$gene[genes_to_keep], ]
+  
+  # Capture QC metrics
+  cat("After gene filtering:",
+      nrow(seurat_obj),
+      "genes remaining\n")
+  after_cell_qc[p] <- nrow(seurat_obj)
+  final_gene_count[p] <- ncol(seurat_obj)
+  median_umi[p] <- median(seurat_obj$nCount_RNA)
+  median_genes[p] <- median(seurat_obj$nFeature_RNA)
+  median_mt_pct[p] <- median(seurat_obj$percent.mt)
+  
+  write.csv(seurat_obj@meta.data, file.path(filt.dir,paste0(sample_name,"_filt_cell_metadata.csv")))
+  
+  cat("Saving new qc_final_filtered Seurat object for",
+      sample_names[p],
+      "\n")
+  saveRDS(seurat_obj, file = file.path(filt.dir, paste0(
+    sample_names[p], "_qc_final_filtered.rds"
   )))
-  rm(seurat_obj) 
+  
+  #-----------------------------------------------
+  # STEP 9: Normalization and variable features
+  #-----------------------------------------------
+  
+  # Log-normalize
+  seurat_obj <- NormalizeData(
+    seurat_obj,
+    normalization.method = "LogNormalize",
+    scale.factor = 10000,
+    verbose = FALSE
+  )
+  
+  # Find highly variable genes
+  seurat_obj <- FindVariableFeatures(
+    seurat_obj,
+    selection.method = "vst",
+    nfeatures = 2000,
+    verbose = FALSE
+  )
+  
+  top10 <- head(VariableFeatures(seurat_obj), 10)
+  cat("Top 10 variable genes:", paste(top10, collapse = ", "), "\n")
+  # Top 10 variable genes: IGLC2, IGKC, LYPD2, LINGO2, IGLC3, PTGDS, FCER1A, IGHM, BANK1, S100A9
+  
+  # Visualize variable features
+  p10 <- VariableFeaturePlot(seurat_obj)
+  p10 <- LabelPoints(plot = p10,
+                     points = top10,
+                     repel = TRUE)
+  
+  print(p10)
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[p], "_07_variable_features.png")
+    ),
+    p10,
+    width = 10,
+    height = 7,
+    dpi = 300
+  )
+  
+  rm(seurat_obj)
 }
+```
 
+## Export QC Summary for all processed Seurat objects
+
+```{r step_10, eval = TRUE}
+#-----------------------------------------------
+# STEP 10: Save processed data and create summary
+#-----------------------------------------------
+ 
+# Create ONE comprehensive QC summary (instead of many CSV files)
+qc_summary <- data.frame(
+  sample = sample_names,
+ 
+  # Cell counts through QC pipeline
+  initial_droplets = initial_droplet_count,  # From raw matrix before EmptyDrops
+  after_emptydrops = validated_barcode_count,  # Cells called by EmptyDrops
+  after_soupx = validated_barcode_count,       # SoupX doesn't remove cells
+  
+  # Cell QC parameters
+  ambient_pct = ifelse(is.null(ambient_fraction), 0, 
+                             round(ambient_fraction * 100, 2)),
+  doublet_rate_pct = round(doublet_rate, 2),
+ 
+  # Cell filtering thresholds used
+  ncount_min = threshold_df_final$ncount_min,
+  ncount_max = threshold_df_final$ncount_max,
+  nfeature_min = threshold_df_final$nfeature_min,
+  nfeature_max = threshold_df_final$nfeature_max,
+  mt_threshold = threshold_df_final$mt_thresh,
+  
+  # Cell counts
+  initial_cells_after_doublet_removal = cells_before_doublet_removal - n_doublets,  # After doublet removal
+  final_cells_after_cell_qc = after_cell_qc,  # After cell-level QC filtering
+ 
+  # Gene counts
+  initial_genes = initial_gene_count,  # From raw matrix
+  final_genes = final_gene_count,      # After gene filtering
+ 
+  # Key metrics (from final filtered data)
+  median_umi = median_umi,
+  median_genes = median_genes,
+  median_mt_pct = median_mt_pct,
+)
+ 
+# Save comprehensive summary
+write.csv(qc_summary, file.path(qc.dir,paste0("qc_metrics/all_samples_QC_summary.csv")), row.names = FALSE)
+
+cat("Files created:\n")
+cat(paste0("  • ",filt.dir,"/_qc_part3_filtered.rds - Clean Seurat objects\n"))
+cat(paste0("  • ",qc.dir,"/qc_metrics/all_samples_QC_summary.csv - Comprehensive QC summary\n"))
+cat(paste0("  • ",filt.dir,"/_filt_cell_metadata.csv - Cell-level metadata per Seurat object\n"))
+```
+
+### Save out final QC metric objects
+
+Outputs gathered into `qc_final.RData` object
+
+```{r save_qc_final, eval = TRUE}
+
+qc_final.file <- "qc_final.RData"
+
+save(
+sample_names,
+empty_lower,
+empty_niters,
+ambient_cutoff,
+initial_droplet_count,
+initial_gene_count,
+validated_barcode_count,
+ambient_fraction,
+n_doublets,
+doublet_rate,
+cells_before_doublet_removal,
+qc_list,
+removal_pct,
+threshold_df_final,
+gene_qc_list,
+after_cell_qc,
+final_gene_count,
+median_umi,
+median_genes,
+median_mt_pct,
+file = file.path(qc.dir,"qc_metrics", qc_final.file)
+)
 ```
 
 ## R sessionInfo
@@ -327,9 +375,66 @@ if (!dir.exists(session.dir)){
   dir.create(session.dir, recursive = T)
 }
 
-write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part2_sessionInfo.csv"))
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part3_sessionInfo.csv"))
 sessionInfo() |>
-  capture.output(file=file.path(session.dir,"QC_part2_sessionInfo_summary.txt"))
+  capture.output(file=file.path(session.dir,"QC_part3_sessionInfo_summary.txt"))
 
 sessionInfo()
 ```
+
+## Best Practices: Essential QC Principles
+
+1. Visual Inspection is Key
+
+- Plots are your primary QC tool
+- Don’t just print metrics – visualize them
+- One good plot > multiple summary statistics
+
+2. Streamlined Reporting
+
+- Brief console feedback during analysis
+- Visual QC checks via plots
+- ONE comprehensive summary at the end
+
+3. Data-Driven Thresholds with Sanity Checks
+
+- Use percentile-based thresholds
+- Apply biological sanity checks – prevent unrealistic thresholds
+- PBMCs: ≥500 genes, ≥800 UMI, <10% MT
+- Warn if removal rate is >30% (too strict) or <5% (too lenient)
+- Document all decisions and adjustments in your summary
+
+4. Iterative QC
+
+- QC is not one-and-done
+- Return to QC plots after clustering
+- Re-evaluate if results seem off
+
+5. Biological Context
+
+- Know your tissue’s expected metrics
+- Different cell types have different profiles
+- Stressed cells aren’t always technical artifacts
+
+## Further Reading
+
+### Official Documentation
+
+- Seurat 5 vignettes: https://satijalab.org/seurat/
+- Seurat GitHub: https://github.com/satijalab/seurat
+- DropletUtils GitHub: https://github.com/MarioniLab/DropletUtils?tab=readme-ov-file
+- SoupX GitHub: https://github.com/constantAmateur/SoupX
+- scDblFinder GitHub: https://github.com/plger/scDblFinder
+
+### References
+
+- Hao Y, Stuart T, Kowalski MH, et al. Dictionary learning for integrative, multimodal and scalable single-cell analysis. Nat Biotechnol. 2024;42(2):293-304. [Seurat 5 paper]
+- Luecken MD, Theis FJ. Current best practices in single-cell RNA-seq analysis: a tutorial. Mol Syst Biol. 2019;15(6):e8746.
+- Lun ATL, Riesenfeld S, Andrews T, et al. EmptyDrops: distinguishing cells from empty droplets in droplet-based single-cell RNA sequencing data. Genome Biol. 2019;20(1):63.
+- Young MD, Behjati S. SoupX removes ambient RNA contamination from droplet-based single-cell RNA sequencing data. Gigascience. 2020;9(12):giaa151.
+- Germain PL, Lun A, Garcia Meixide C, Macnair W, Robinson MD. Doublet identification in single-cell sequencing data using scDblFinder. F1000Res. 2021;10:979.
+- Osorio D, Cai JJ. Systematic determination of the mitochondrial proportion in human and mice tissues for single-cell RNA-sequencing data quality control. Bioinformatics. 2021;37(7):963-967.
+- McCarthy DJ, Campbell KR, Lun ATL, Wills QF. Scater: pre-processing, quality control, normalization and visualization of single-cell RNA-seq data in R. Bioinformatics. 2017;33(8):1179-1186.
+- Amezquita RA, Lun ATL, Becht E, et al. Orchestrating single-cell analysis with Bioconductor. Nat Methods. 2020;17(2):137-145.
+- Zheng GXY, Terry JM, Belgrader P, et al. Massively parallel digital transcriptional profiling of single cells. Nat Commun. 2017;8:14049.
+- Lee H, Joo JY, Sohn DH, et al. Single-cell RNA sequencing reveals rebalancing of immunological response in patients with periodontitis after non-surgical periodontal therapy. J Transl Med. 2022;20(1):504. [Dataset source]

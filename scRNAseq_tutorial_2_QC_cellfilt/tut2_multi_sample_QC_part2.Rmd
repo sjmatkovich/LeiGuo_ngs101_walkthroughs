@@ -51,14 +51,14 @@ filt.dir <- file.path(base.dir,"filtered_data")
 if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
 
 # Create output directories
-dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
-dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
+if (!dir.exists(file.path(qc.dir,"plots"))) dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
+if (!dir.exists(file.path(qc.dir,"qc_metrics"))) dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
 
 # Set random seed for reproducibility
 set.seed(27)
 
 qc_part1.file <- "qc_part1.RData"
-load(qc.dir,qc_part1.file)
+load(file.path(qc.dir,"qc_metrics",qc_part1.file))
 ```
 
 ## Cell-Level Quality Control: Visualization (after threshold setting)
@@ -71,7 +71,7 @@ An alternative would be to construct a table elsewhere with samples as rows and 
 
 Another reason to specify thresholds in a table is ease of adjustment after re-visualization.
 
-```{r step_7b_1, fig.width = 8, fig.height = 7, eval = FALSE}
+```{r step_7b_1, fig.width = 8, fig.height = 7, eval = TRUE}
 # For an example case - adjust if necessary
 nfeature_min <- rep(500, 12)    # Minimum genes per cell
 nfeature_max <- rep(5000, 12)   # Maximum genes (above this = likely doublets)
@@ -94,7 +94,7 @@ threshold_df <- data.frame(sample_names = sample_names,
 
 ### Visualize effect of thresholds (loop)
 
-```{r step_7b_2, fig.width = 8, fig.height = 7, eval = FALSE}
+```{r step_7b_2, fig.width = 8, fig.height = 7, eval = TRUE}
 
 qc_list <- list()
 removal_pct <- NULL
@@ -285,7 +285,7 @@ threshold_df_final <- threshold_df
 
 Run this section (set `eval = TRUE`) only after performing above steps
 
-```{r implement_cell_thresholds, eval = FALSE}
+```{r implement_cell_thresholds, eval = TRUE}
 
 cells_before_cell_qc <- NULL
 
@@ -307,7 +307,7 @@ seurat_obj <- subset(
            nFeature_RNA <= threshold_df_final$nfeature_max[m] &
            percent.mt < threshold_df_final$mt_thresh[m]
 )
-cat("Before filtering:", nrow(qc_list[[m]]), "cells") 
+cat("Before filtering:", nrow(qc_list[[m]]), "cells\n") 
 cat("After filtering:", ncol(seurat_obj), "cells remaining\n") 
 cat("Saving new qc_part2_filtered Seurat object for",sample_names[m],"\n")
   saveRDS(seurat_obj,
@@ -317,6 +317,23 @@ cat("Saving new qc_part2_filtered Seurat object for",sample_names[m],"\n")
   rm(seurat_obj) 
 }
 
+```
+
+### Save out QC metric objects generated after threshold setting
+
+Outputs gathered into `qc_part2b.RData` object (adding `threshold_df_final` to previous part2 set)
+
+```{r save_qc_part2b, eval = TRUE}
+qc_part2b.file <- "qc_part2b.RData"
+
+save(
+sample_names,
+threshold_df,
+qc_list,
+removal_pct,
+threshold_df_final,
+file = file.path(qc.dir,"qc_metrics", qc_part2b.file)
+)
 ```
 
 ## R sessionInfo

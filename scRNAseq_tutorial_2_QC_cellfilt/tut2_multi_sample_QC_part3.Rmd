@@ -172,7 +172,9 @@ load(file = file.path(qc.dir,"qc_metrics", qc_part3.file))
 
 Set up a `min_pct_cells` vector to implement separate cutoffs for each Seurat object in `sample_names`
 
-Don't run the following implementation section prior to inspecting gene-level QC plots and choosing cutoffs.
+Don't run the following implementation section before inspecting gene-level QC plots and choosing cutoffs.
+
+**The gene-filtered Seurat objects** will be saved out with `_qc_final_filtered.rds` suffixes.
 
 After implementing gene-level cutoffs, plots are generated for **Variable Features**. These genes show high variability across cells (not just high expression). They’re likely involved in defining cell types and states, making them most useful for downstream clustering and cell type identification.
 

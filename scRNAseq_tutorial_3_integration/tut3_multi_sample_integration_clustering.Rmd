@@ -1,0 +1,197 @@
+---
+title: "ngs101_scRNAseq_walkthrough_3_QC - integration and clustering"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-3-integration-and-clustering>
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+library(glmGamPoi) # speeds up SCTransform
+ 
+# Integration methods
+library(harmony)
+library(batchelor)
+library(SeuratWrappers)
+ 
+# Visualization and data manipulation
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+ 
+# Quality metrics and utilities
+library(FNN)              # K-nearest neighbor calculations for mixing metrics
+library(cluster)          # Silhouette scores for clustering quality
+library(reshape2)         # Data reshaping for visualization
+ 
+# Parallel processing
+library(future)
+options(future.globals.maxSize = 20 * 1024^3)  # Increase to 20GB for large datasets
+ 
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+# qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
+# if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
+filt.dir <- file.path(base.dir,"filtered_data")
+if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
+integr.dir <- file.path(base.dir, "integration_analysis")
+
+# Create output directories
+dir.create("plots", showWarnings = FALSE)
+dir.create("plots/integration_comparison", showWarnings = FALSE)
+dir.create("plots/clustering", showWarnings = FALSE)
+dir.create("integrated_data", showWarnings = FALSE)
+dir.create("metadata", showWarnings = FALSE)
+
+# Set random seed for reproducibility
+set.seed(27)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+```
+
+## Define sample paths and load QC-filtered Seurat objects
+
+The default is to load in the cell- and gene-filtered separate sample objects from the previous walkthrough. However, by defining the `suffix` parameter below, it would be possible to choose between cell-filtered only `_qc_part2_filtered.rds` or cell- and gene-filtered `_qc_final_filtered.rds`.
+
+**This may be important** if all possible genes are desired in the aggregated Seurat object (e.g. to help identify or discover rare cell populations that are only present in some samples in the project).
+
+```{r step2}
+
+suffix <- "_qc_final_filtered.rds" # could also be "_qc_part2_filtered.rds"
+
+# Define sample metadata
+sample_metadata <- data.frame(
+  sample_names = c(
+    "Healthy_1", "Healthy_2", "Healthy_3", "Healthy_4",
+    "Post_Patient_1", "Post_Patient_2", "Post_Patient_3", "Post_Patient_4"
+  ),
+  condition = c(
+    rep("Healthy", 4),
+    rep("Post_Treatment", 4)
+  ),
+  patient_id = c(
+    "Donor_1", "Donor_2", "Donor_3", "Donor_4",
+    "Patient_1", "Patient_2", "Patient_3", "Patient_4"
+  )
+)
+
+# Load QC-filtered Seurat objects
+
+seurat_list <- lapply(sample_metadata$sample_names, function(sample_name) {
+  obj <- readRDS(file.path(filt.dir, paste0(sample_name, suffix)))
+ 
+  # Ensure metadata is consistent
+  obj$sample_id <- sample_name
+  obj$condition <- sample_metadata$condition[sample_metadata$sample_names == sample_name]
+  obj$patient_id <- sample_metadata$patient_id[sample_metadata$sample_names == sample_name]
+ 
+  return(obj)
+})
+
+names(seurat_list) <- sample_metadata$sample_names
+```
+
+### Ensure all samples have the same genes
+
+This is critical for e.g. FastMNN integration. See note above on bypassing initial gene-level filtering in the QC process for specific purposes.
+
+```{r gene_check}
+
+# Ensure all samples have the same genes (critical for FastMNN integration)
+all_genes <- lapply(seurat_list, rownames)
+common_genes <- Reduce(intersect, all_genes)
+ 
+# Subset all samples to common genes
+seurat_list <- lapply(seurat_list, function(obj) {
+  obj[common_genes, ]
+})
+ 
+# Report dimensions
+cat("\nLoaded", length(seurat_list), "QC-filtered samples:\n")
+for (sample_id in names(seurat_list)) {
+  cat(sprintf("  %s: %d cells × %d genes\n", 
+              sample_id, 
+              ncol(seurat_list[[sample_id]]), 
+              nrow(seurat_list[[sample_id]])))
+}
+ 
+cat("\nTotal cells across all samples:", 
+    sum(sapply(seurat_list, ncol)), "\n")
+```
+
+## Naive merge without integration
+
+```{r naive_merge}
+#-----------------------------------------------
+# STEP 3: Naive merge without integration
+#-----------------------------------------------
+ 
+# Merge all samples
+merged_naive <- merge(
+  x = seurat_list[[1]],
+  y = seurat_list[-1],
+  add.cell.ids = names(seurat_list),
+  project = "GSE174609_Naive_Merge"
+)
+ 
+cat("Merged dataset:", ncol(merged_naive), "cells ×", nrow(merged_naive), "genes\n")
+# Merged dataset: 72649 cells × 18861 genes
+ 
+# Standard Seurat workflow
+merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
+merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
+merged_naive <- ScaleData(merged_naive, verbose = FALSE)
+merged_naive <- RunPCA(merged_naive, npcs = 50, verbose = FALSE)
+merged_naive <- RunUMAP(merged_naive, dims = 1:30, reduction = "pca", verbose = FALSE)
+merged_naive <- FindNeighbors(merged_naive, dims = 1:30, verbose = FALSE)
+merged_naive <- FindClusters(merged_naive, resolution = 0.6, verbose = FALSE)
+ 
+cat("Clustering complete:", length(unique(merged_naive$seurat_clusters)), "clusters identified\n")
+
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut3_integration_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"tut3_integration_sessionInfo_summary.txt"))
+
+sessionInfo()
+```
+
+
+
+

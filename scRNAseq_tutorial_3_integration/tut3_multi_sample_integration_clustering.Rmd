@@ -105,6 +105,7 @@ sample_metadata <- data.frame(
 # Load QC-filtered Seurat objects
 
 seurat_list <- lapply(sample_metadata$sample_names, function(sample_name) {
+  cat("Reading in Seurat object",paste0(sample_name,suffix),"\n")
   obj <- readRDS(file.path(filt.dir, paste0(sample_name, suffix)))
  
   # Ensure metadata is consistent
@@ -146,7 +147,13 @@ cat("\nTotal cells across all samples:",
     sum(sapply(seurat_list, ncol)), "\n")
 ```
 
-## Naive merge without integration
+## Naive merge without integration, with basic cluster determination
+
+Use `SCTransform` here by default rather than the standard Seurat normalization workflow for basic clustering.
+
+For snRNAseq, consider calculating MALAT1 ratios for each separate sample object in the earlier QC process, and then using MALAT1 ratios as an additional parameter in SCTransform `vars.to.regress`
+
+**After the merge**: this is the place to convert the object to on-disk via `BPCells` and thus facilitate further operations. The benefit of on-disk storage is apparent with the standard Seurat normalization workflow, but `SCTransform` requires all data in memory (at least for Seurat 5.4; https://github.com/satijalab/sctransform/issues/207)
 
 ```{r naive_merge}
 #-----------------------------------------------
@@ -163,11 +170,35 @@ merged_naive <- merge(
  
 cat("Merged dataset:", ncol(merged_naive), "cells ×", nrow(merged_naive), "genes\n")
 # Merged dataset: 72649 cells × 18861 genes
- 
-# Standard Seurat workflow
-merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
-merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
-merged_naive <- ScaleData(merged_naive, verbose = FALSE)
+
+for (layer in Layers(merged_naive, search = "counts")) {
+  mat <- LayerData(merged_naive, layer = layer)
+  path <- file.path(integr.dir,"bpcells_naive_merge", layer)
+  write_matrix_dir(mat, path)
+  LayerData(merged_naive, layer = layer) <- open_matrix_dir(path)
+}
+
+## (Standard workflow commands are commented out)
+# merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
+# merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
+# merged_naive <- ScaleData(merged_naive, verbose = FALSE)
+
+## SCTransform
+options(Seurat.object.assay.version = "v5")
+merged_naive <- SCTransform(merged_naive,
+  vars.to.regress = c("percent.mt"),
+  return.only.var.genes = TRUE,
+  verbose = TRUE,
+  conserve.memory = TRUE
+)
+
+# This procedure of exporting SCT layers out as BPCells matrices will only work if SCT was created as a v5 Assay. I'm not sure this is actually possible despite 'options' command above. Following Claude suggestions 2026-04-29
+for (layer in Layers(merged_naive, assay="SCT", search = "counts")) {
+  mat <- LayerData(merged_naive, assay="SCT", layer = layer)
+  path <- file.path(integr.dir,"bpcells_naive_merge_sct_counts", layer)
+  write_matrix_dir(mat, path)
+  LayerData(merged_naive, assay="SCT", layer = layer) <- open_matrix_dir(path)
+}
 merged_naive <- RunPCA(merged_naive, npcs = 50, verbose = FALSE)
 merged_naive <- RunUMAP(merged_naive, dims = 1:30, reduction = "pca", verbose = FALSE)
 merged_naive <- FindNeighbors(merged_naive, dims = 1:30, verbose = FALSE)

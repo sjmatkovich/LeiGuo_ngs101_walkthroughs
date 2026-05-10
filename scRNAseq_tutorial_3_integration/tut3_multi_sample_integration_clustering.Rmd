@@ -297,6 +297,8 @@ Code is presented below to subset the object, sequentially according to biosampl
 
 ### Subsetting code
 
+Not run 2026-05-09 in order to replicate original tutorial, but worth considering for future work. The subsetted object would be used to evaluate integration method performance, and then the chosen method would be applied to the original object with all cells.
+
 ```{r subset_Seurat_object, eval = FALSE}
 
 sample_ids <- unique(merged_seurat@meta.data$sample_id)
@@ -344,6 +346,8 @@ merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.cca", dims = 1:3
  
 cat("CCA integration complete:", length(unique(merged_seurat$cca_clusters)), "clusters\n")
 # CCA integration complete: 23 clusters
+
+saveRDS(merged_naive,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
 ```
 
 

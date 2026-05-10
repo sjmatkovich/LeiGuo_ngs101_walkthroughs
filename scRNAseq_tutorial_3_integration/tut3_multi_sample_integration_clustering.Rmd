@@ -30,6 +30,7 @@ Primary source:
 # Core single-cell analysis
 library(Seurat)
 library(SeuratObject)
+library(BPCells)
 library(glmGamPoi) # speeds up SCTransform
  
 # Integration methods
@@ -52,7 +53,7 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 20 * 1024^3)  # Increase to 20GB for large datasets
+options(future.globals.maxSize = 20 * 1024^3)  # Increase to 20GB for large datasets - needed during integration steps
  
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
@@ -198,11 +199,12 @@ merged_naive <- FindClusters(merged_naive, resolution = 0.6, verbose = FALSE)
  
 cat("Clustering complete:", length(unique(merged_naive$seurat_clusters)), "clusters identified with default parameters\n")
 
+saveRDS(merged_naive,file.path(integr.dir,"integrated_data","merged_naive.rds"))
 ```
 
 ### Visualize basic clusters
 
-```{r naive_merge_basic_cluster_viz}
+```{r naive_merge_basic_cluster_viz, fig.width = 16, fig.height = 12}
 
 #-----------------------------------------------
 # STEP 4: Visualize batch effects in naive merge
@@ -247,10 +249,104 @@ p4_naive <- DimPlot(merged_naive, reduction = "umap", group.by = "condition",
   theme(strip.text = element_text(size = 9, face = "bold"))
  
 # Combine plots
-combined_naive <- (p1_naive | p2_naive) / (p3_naive | p4_naive)
+(combined_naive <- (p1_naive | p2_naive) / (p3_naive | p4_naive))
 ggsave(file.path(integr.dir,"plots/01_naive_merge_batch_effects.png"), combined_naive, 
        width = 16, height = 12, dpi = 300)
 ```
+
+### Quantify apparent batch effects
+
+The criterion used in this walkthrough for excessive contribution of a single sample to a cluster is >50% of cluster membership.
+
+```{r naive_merge_batch_effects}
+#-----------------------------------------------
+# STEP 5: Quantify batch effects with mixing metrics
+#-----------------------------------------------
+ 
+# Calculate per-cluster sample composition
+cluster_composition <- table(merged_naive$seurat_clusters, merged_naive$sample_id)
+cluster_composition_pct <- prop.table(cluster_composition, margin = 1) * 100
+ 
+# Find clusters dominated by single samples (>50% from one sample = batch-driven)
+dominant_sample_clusters <- apply(cluster_composition_pct, 1, max) > 50
+n_batch_clusters <- sum(dominant_sample_clusters)
+ 
+cat("\nBatch effect assessment:\n")
+cat("  Clusters dominated by single sample (>50%):", n_batch_clusters, 
+    "/", nrow(cluster_composition), "\n")
+# Clusters dominated by single sample (>50%): 1 / 19
+ 
+if (n_batch_clusters > 0) {
+  cat("    Naive merge shows significant batch effects\n")
+  cat("  → Integration is necessary\n")
+}
+```
+## Integration procedures
+
+The `merged_naive` Seurat object has had metadata added in prior steps. It's ready for further steps. A copy will be made as `merged_seurat` and the integration procedures wil be run on this new object.
+
+**Note**: the orgiinal tutorial performed standard Seurat normalization (`NormalizeData`, `FindVariableFeatures`, `ScaleData`) followed by `RunPCA` to prepare the object for integration. In this case I'm working with `SCTransform` followed by PCA reduction.
+
+```{r copy_object}
+merged_seurat <- merged_naive
+```
+
+**Also note**: the original tutorial did not recommend **subsampling** the object to reduce compute burden for calculating integration. This could be considered for large data sets.
+
+Code is presented below to subset the object, sequentially according to biosample (cell donor) so as not to skew the subset toward biosamples with larger cell numbers. Default `eval = FALSE`
+
+### Subsetting code
+
+```{r subset_Seurat_object, eval = FALSE}
+
+sample_ids <- unique(merged_seurat@meta.data$sample_id)
+cell_frac <- 0.20
+
+cells_to_keep <- NULL
+for (s in seq_along(sample_ids)) {
+  tmp_sub <- subset(merged_seurat, subset = sample == sample_ids[s])
+  tmp_keep <- sample(colnames(tmp_sub), round(ncol(tmp_sub) * cell_frac))
+  cells_to_keep <- c(cells_to_keep, tmp_keep)
+}
+rm(tmp_sub, tmp_keep)
+
+merged_seurat <- subset(merged_seurat, cells = cells_to_keep)
+```
+
+### Preserve integration layers within the same object
+
+The original tutorial produced a separate Seurat object for each integration. This should not be necessary, so I've performed each integration within the `merged_seurat` object. The UMAPs for each integration can be retrieved by name.
+
+### CCA integration
+
+```{r run_cca}
+
+#-----------------------------------------------
+# STEP 7: CCA Integration
+#-----------------------------------------------
+ 
+# Integrate using CCA
+merged_seurat <- IntegrateLayers(
+  object = merged_seurat,
+  method = CCAIntegration,
+  orig.reduction = "pca",
+  new.reduction = "integrated.cca",
+  normalization.method = "SCT",
+  dims = 1:30,
+  verbose = FALSE
+)
+ 
+# Standard downstream workflow
+merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.cca", dims = 1:30, verbose = FALSE)
+merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "cca_clusters", verbose = FALSE)
+merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.cca", dims = 1:30, 
+                          reduction.name = "umap.cca", verbose = FALSE)
+ 
+cat("CCA integration complete:", length(unique(merged_seurat$cca_clusters)), "clusters\n")
+# CCA integration complete: 23 clusters
+```
+
+
 
 ## R sessionInfo
 

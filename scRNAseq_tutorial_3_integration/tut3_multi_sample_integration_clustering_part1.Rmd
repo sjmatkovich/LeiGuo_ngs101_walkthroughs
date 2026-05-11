@@ -1,5 +1,5 @@
 ---
-title: "ngs101_scRNAseq_walkthrough_3_QC - integration and clustering"
+title: "ngs101_scRNAseq_walkthrough_3 - Part 1. Merge and prepare integration"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 output:
@@ -53,7 +53,7 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 20 * 1024^3)  # Increase to 20GB for large datasets - needed during integration steps
+options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
  
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
@@ -285,7 +285,7 @@ if (n_batch_clusters > 0) {
 
 The `merged_naive` Seurat object has had metadata added in prior steps. It's ready for further steps. A copy will be made as `merged_seurat` and the integration procedures wil be run on this new object.
 
-**Note**: the orgiinal tutorial performed standard Seurat normalization (`NormalizeData`, `FindVariableFeatures`, `ScaleData`) followed by `RunPCA` to prepare the object for integration. In this case I'm working with `SCTransform` followed by PCA reduction.
+**Note**: the original tutorial performed standard Seurat normalization (`NormalizeData`, `FindVariableFeatures`, `ScaleData`) followed by `RunPCA` to prepare the object for integration. For this modified walkthough (2026-05) I'm using `SCTransform` followed by PCA reduction.
 
 ```{r copy_object}
 merged_seurat <- merged_naive
@@ -315,9 +315,25 @@ rm(tmp_sub, tmp_keep)
 merged_seurat <- subset(merged_seurat, cells = cells_to_keep)
 ```
 
+### Check whether layers are already split
+
+```{r check_layer_split, eval=FALSE}
+# Check if layers are already split
+current_layers <- Layers(merged_seurat[["SCT"]])
+if (length(current_layers) > 1) {
+  cat("Layers already split by merge operation (", length(current_layers), " layers)\n", sep = "")
+} else {
+  # Split layers by sample if not already split
+  cat("Splitting layers by sample\n")
+  merged_seurat[["SCT"]] <- split(merged_seurat[["SCT"]], f = merged_seurat$sample_id)
+}
+```
+
 ### Preserve integration layers within the same object
 
 The original tutorial produced a separate Seurat object for each integration. This should not be necessary, so I've performed each integration within the `merged_seurat` object. The UMAPs for each integration can be retrieved by name.
+
+There are `saveRDS` commands at the end of each integration section to preserve work done in case of crashes. These can be commented out.
 
 ### CCA integration
 
@@ -347,10 +363,105 @@ merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.cca", dims = 1:3
 cat("CCA integration complete:", length(unique(merged_seurat$cca_clusters)), "clusters\n")
 # CCA integration complete: 23 clusters
 
-saveRDS(merged_naive,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
 ```
 
+### RPCA integration
 
+```{r rpca_integration}
+#-----------------------------------------------
+# STEP 8: RPCA Integration
+#-----------------------------------------------
+ 
+# Integrate using RPCA
+merged_seurat <- IntegrateLayers(
+  object = merged_seurat,
+  method = RPCAIntegration,
+  orig.reduction = "pca",
+  new.reduction = "integrated.rpca",
+  normalization.method = "SCT",
+  dims = 1:30,
+  verbose = FALSE
+)
+ 
+# Downstream workflow
+merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.rpca", dims = 1:30, verbose = FALSE)
+merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "rpca_clusters", verbose = FALSE)
+merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.rpca", dims = 1:30,
+                           reduction.name = "umap.rpca", verbose = FALSE)
+ 
+cat("RPCA integration complete:", length(unique(merged_seurat$rpca_clusters)), "clusters\n")
+# RPCA integration complete: 22 clusters
+
+saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+```
+
+### Harmony integration
+
+```{r harmony}
+# Run Harmony (corrects batch effects on PCA embedding)
+# Harmony works directly on PCA embedding
+
+merged_seurat <- RunHarmony(merged_seurat,
+                            group.by.vars = "sample_id", # covariates for which harmony will remove effect on data
+                            reduction.use = "pca",
+                            dims.use = 1:50,
+                            reduction.save = "integrated.harmony"
+                            )
+ 
+# Downstream workflow
+merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.harmony", dims = 1:30, verbose = FALSE)
+merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "harmony_clusters", verbose = FALSE)
+merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.harmony", dims = 1:30,
+                                reduction.name = "umap.harmony", verbose = FALSE)
+ 
+cat("Harmony integration complete:", length(unique(merged_seurat$harmony_clusters)), "clusters\n")
+# Harmony integration complete: 21 clusters
+
+saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+```
+
+### FastMNN integration
+
+Note that unlike the other three methods evaluated here, FastMNN (in the `batchelor` package) also corrects counts, which are placed in a new Seurat Assay (`mnn.reconstructed` by default). This in addition to the embeddings encoded in `integrated.mnn`.
+
+The code chunk below is for FastMNN integration after the **standard normalization** workflow, and with an identical number of genes in each layer established by upstream chunk 'gene check'.
+
+```{r fastmnn_integration_nfs}
+#-----------------------------------------------
+# STEP 10: FastMNN Integration
+#-----------------------------------------------
+
+merged_seurat <- IntegrateLayers(
+  object = merged_seurat,
+  method = FastMNNIntegration,
+  normalization.method = "RNA",
+  orig.reduction = "pca",
+  new.reduction = "integrated.mnn",
+  verbose = FALSE
+)
+ 
+cat("FastMNN integration complete\n")
+ 
+# Downstream workflow
+merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.mnn", dims = 1:30, verbose = FALSE)
+merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "fastmnn_clusters", verbose = FALSE)
+merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.mnn", dims = 1:30,
+                              reduction.name = "umap.mnn", verbose = FALSE)
+ 
+cat("Clustering complete:", length(unique(merged_seurat$fastmnn_clusters)), "clusters\n")
+# FastMNN integration complete: 20 clusters
+
+saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+```
+
+#### Difficulties with FastMNN and SCTransform
+
+`SCTransform` can select different numbers of variable genes for each layer or sample (~= cell donor). This differs from standard normalization, for which there has already been a check to ensure each layer has the same number of genes (see upstream chunk 'gene_check').
+
+The `FastMNN` function from `batchelor` is very strict about reconciling genes across layers or batches. An alternative is illustrated by the **`SeuratIntegrate`** package used in Q3 2025, in which the command `DoIntegrate(MNNIntegration...)` calls the `mnnCorrect` function from `batchelor` under the hood. This handles `SCTransform` Assays gracefully, but is very slow.
+
+Another alternative would be to construct a custom `SeuratWrappers` function to integrate `mnnCorrect` into Seurat's `IntegrateLayers` function.
 
 ## R sessionInfo
 
@@ -360,9 +471,9 @@ if (!dir.exists(session.dir)){
   dir.create(session.dir, recursive = T)
 }
 
-write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut3_integration_sessionInfo.csv"))
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut3_integration_part1_sessionInfo.csv"))
 sessionInfo() |>
-  capture.output(file=file.path(session.dir,"tut3_integration_sessionInfo_summary.txt"))
+  capture.output(file=file.path(session.dir,"tut3_integration_part1_sessionInfo_summary.txt"))
 
 sessionInfo()
 ```

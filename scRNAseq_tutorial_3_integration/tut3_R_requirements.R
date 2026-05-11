@@ -17,6 +17,9 @@ options(repos = c(CRAN = "https://cloud.r-project.org"))
 # Core packages (already installed in Part 2)
 # Seurat, ggplot2, dplyr, patchwork
 
+install.packages("devtools")
+devtools::install_github("bnprks/BPCells") # BPCells facilitates large count matrix handling for Seurat
+
 # Install Bioconductor packages for advanced integration
 if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")

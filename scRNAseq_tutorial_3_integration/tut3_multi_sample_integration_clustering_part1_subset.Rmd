@@ -303,42 +303,39 @@ if (n_batch_clusters > 0) {
 ```
 ## Integration procedures
 
-The `merged_naive` Seurat object has had metadata added in prior steps. It's ready for further steps. A copy will be made as `merged_seurat` and the integration procedures wil be run on this new object.
+The `merged_naive` Seurat object has had metadata added in prior steps. It's ready for further steps. A copy will be made as `merged_seurat_subset` and the integration procedures wil be run on this new object.
 
 **Note**: the original tutorial performed standard Seurat normalization (`NormalizeData`, `FindVariableFeatures`, `ScaleData`) followed by `RunPCA` to prepare the object for integration. For this modified walkthough (2026-05) I'm using `SCTransform` followed by PCA reduction.
 
 ```{r copy_object}
-merged_seurat <- merged_naive
+merged_seurat_subset <- merged_naive
 ```
-
-**Also note**: the original tutorial did not recommend **subsampling** the object to reduce compute burden for calculating integration. This could be considered for large data sets.
 
 Code is presented below to subset the object, sequentially according to biosample (cell donor) so as not to skew the subset toward biosamples with larger cell numbers. Default `eval = FALSE`
 
 ### Subsampling code
 
-Not run 2026-05-09 in order to replicate original tutorial, but worth considering for future work. The subsetted object would be used to evaluate integration method performance, and then the chosen method would be applied to the original object with all cells.
+Run 2026-05-10. The subsetted object would be used to evaluate integration method performance, and then the chosen method would be applied to the original object with all cells.
 
-```{r subset_Seurat_object, eval = FALSE}
+```{r subset_Seurat_object, eval = TRUE}
 
-sample_ids <- unique(merged_seurat@meta.data$sample_id)
+sample_ids <- unique(merged_seurat_subset@meta.data$sample_id)
 cell_frac <- 0.20
 
 cells_to_keep <- NULL
 for (s in seq_along(sample_ids)) {
-  tmp_sub <- subset(merged_seurat, subset = sample_id == sample_ids[s])
+  tmp_sub <- subset(merged_seurat_subset, subset = sample_id == sample_ids[s])
   tmp_keep <- sample(colnames(tmp_sub), round(ncol(tmp_sub) * cell_frac))
   cells_to_keep <- c(cells_to_keep, tmp_keep)
 }
 rm(tmp_sub, tmp_keep)
 
-merged_seurat <- subset(merged_seurat, cells = cells_to_keep)
+merged_seurat_subset <- subset(merged_seurat_subset, cells = cells_to_keep)
 ```
-
 
 ### Preserve integration layers within the same object
 
-The original tutorial produced a separate Seurat object for each integration. This should not be necessary, so I've performed each integration within the `merged_seurat` object. The UMAPs for each integration can be retrieved by name.
+The original tutorial produced a separate Seurat object for each integration. This should not be necessary, so I've performed each integration within the `merged_seurat_subset` object. The UMAPs for each integration can be retrieved by name.
 
 There are `saveRDS` commands at the end of each integration section to preserve work done in case of crashes. These can be commented out.
 
@@ -351,8 +348,8 @@ There are `saveRDS` commands at the end of each integration section to preserve 
 #-----------------------------------------------
  
 # Integrate using CCA
-merged_seurat <- IntegrateLayers(
-  object = merged_seurat,
+merged_seurat_subset <- IntegrateLayers(
+  object = merged_seurat_subset,
   method = CCAIntegration,
   orig.reduction = "pca",
   new.reduction = "integrated.cca",
@@ -362,15 +359,15 @@ merged_seurat <- IntegrateLayers(
 )
  
 # Standard downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.cca", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "cca_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.cca", dims = 1:30, 
+merged_seurat_subset <- FindNeighbors(merged_seurat_subset, reduction = "integrated.cca", dims = 1:30, verbose = FALSE)
+merged_seurat_subset <- FindClusters(merged_seurat_subset, resolution = 0.6, cluster.name = "cca_clusters", verbose = FALSE)
+merged_seurat_subset <- RunUMAP(merged_seurat_subset, reduction = "integrated.cca", dims = 1:30, 
                           reduction.name = "umap.cca", verbose = FALSE)
  
-cat("CCA integration complete:", length(unique(merged_seurat$cca_clusters)), "clusters\n")
+cat("CCA integration complete:", length(unique(merged_seurat_subset$cca_clusters)), "clusters\n")
 # CCA integration complete: 23 clusters
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+saveRDS(merged_seurat_subset,file.path(integr.dir,"integrated_data","merged_seurat_subset_with_integrations.rds"))
 ```
 
 ### RPCA integration
@@ -381,8 +378,8 @@ saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with
 #-----------------------------------------------
  
 # Integrate using RPCA
-merged_seurat <- IntegrateLayers(
-  object = merged_seurat,
+merged_seurat_subset <- IntegrateLayers(
+  object = merged_seurat_subset,
   method = RPCAIntegration,
   orig.reduction = "pca",
   new.reduction = "integrated.rpca",
@@ -392,15 +389,15 @@ merged_seurat <- IntegrateLayers(
 )
  
 # Downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.rpca", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "rpca_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.rpca", dims = 1:30,
+merged_seurat_subset <- FindNeighbors(merged_seurat_subset, reduction = "integrated.rpca", dims = 1:30, verbose = FALSE)
+merged_seurat_subset <- FindClusters(merged_seurat_subset, resolution = 0.6, cluster.name = "rpca_clusters", verbose = FALSE)
+merged_seurat_subset <- RunUMAP(merged_seurat_subset, reduction = "integrated.rpca", dims = 1:30,
                            reduction.name = "umap.rpca", verbose = FALSE)
  
-cat("RPCA integration complete:", length(unique(merged_seurat$rpca_clusters)), "clusters\n")
+cat("RPCA integration complete:", length(unique(merged_seurat_subset$rpca_clusters)), "clusters\n")
 # RPCA integration complete: 22 clusters
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+saveRDS(merged_seurat_subset,file.path(integr.dir,"integrated_data","merged_seurat_subset_with_integrations.rds"))
 ```
 
 ### Harmony integration
@@ -409,7 +406,7 @@ saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with
 # Run Harmony (corrects batch effects on PCA embedding)
 # Harmony works directly on PCA embedding
 
-merged_seurat <- RunHarmony(merged_seurat,
+merged_seurat_subset <- RunHarmony(merged_seurat_subset,
                             group.by.vars = "sample_id", # covariates for which harmony will remove effect on data
                             reduction.use = "pca",
                             dims.use = 1:50,
@@ -417,15 +414,15 @@ merged_seurat <- RunHarmony(merged_seurat,
                             )
  
 # Downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.harmony", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "harmony_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.harmony", dims = 1:30,
+merged_seurat_subset <- FindNeighbors(merged_seurat_subset, reduction = "integrated.harmony", dims = 1:30, verbose = FALSE)
+merged_seurat_subset <- FindClusters(merged_seurat_subset, resolution = 0.6, cluster.name = "harmony_clusters", verbose = FALSE)
+merged_seurat_subset <- RunUMAP(merged_seurat_subset, reduction = "integrated.harmony", dims = 1:30,
                                 reduction.name = "umap.harmony", verbose = FALSE)
  
-cat("Harmony integration complete:", length(unique(merged_seurat$harmony_clusters)), "clusters\n")
+cat("Harmony integration complete:", length(unique(merged_seurat_subset$harmony_clusters)), "clusters\n")
 # Harmony integration complete: 21 clusters
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+saveRDS(merged_seurat_subset,file.path(integr.dir,"integrated_data","merged_seurat_subset_with_integrations.rds"))
 ```
 
 ### FastMNN integration
@@ -438,10 +435,10 @@ The code chunk below is for FastMNN integration after the **standard normalizati
 #-----------------------------------------------
 # STEP 10: FastMNN Integration
 #-----------------------------------------------
-DefaultAssay(merged_seurat) <- "RNA"
+DefaultAssay(merged_seurat_subset) <- "RNA"
 
-merged_seurat <- IntegrateLayers(
-  object = merged_seurat,
+merged_seurat_subset <- IntegrateLayers(
+  object = merged_seurat_subset,
   method = FastMNNIntegration,
   orig.reduction = "pca",
   new.reduction = "integrated.mnn",
@@ -451,17 +448,17 @@ merged_seurat <- IntegrateLayers(
 cat("FastMNN integration complete\n")
  
 # Downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.mnn", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "fastmnn_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.mnn", dims = 1:30,
+merged_seurat_subset <- FindNeighbors(merged_seurat_subset, reduction = "integrated.mnn", dims = 1:30, verbose = FALSE)
+merged_seurat_subset <- FindClusters(merged_seurat_subset, resolution = 0.6, cluster.name = "fastmnn_clusters", verbose = FALSE)
+merged_seurat_subset <- RunUMAP(merged_seurat_subset, reduction = "integrated.mnn", dims = 1:30,
                               reduction.name = "umap.mnn", verbose = FALSE)
  
-cat("Clustering complete:", length(unique(merged_seurat$fastmnn_clusters)), "clusters\n")
+cat("Clustering complete:", length(unique(merged_seurat_subset$fastmnn_clusters)), "clusters\n")
 # FastMNN integration complete: 20 clusters
 
-DefaultAssay(merged_seurat) <- "SCT" # back to previous state
+DefaultAssay(merged_seurat_subset) <- "SCT" # back to previous state
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+saveRDS(merged_seurat_subset,file.path(integr.dir,"integrated_data","merged_seurat_subset_with_integrations.rds"))
 ```
 
 #### Difficulties with FastMNN and SCTransform

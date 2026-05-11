@@ -154,6 +154,8 @@ Use `SCTransform` here by default rather than the standard Seurat normalization 
 
 For snRNAseq, consider calculating MALAT1 ratios for each separate sample object in the earlier QC process, and then using MALAT1 ratios as an additional parameter in SCTransform `vars.to.regress`
 
+The `glmGamPoi` package substantially improves speed and is used by default if installed.
+
 **After the merge**: this is the place to convert the object to on-disk via `BPCells` and thus facilitate further operations. The benefit of on-disk storage is apparent with the standard Seurat normalization workflow, but `SCTransform` requires all data in memory (at least for Seurat 5.4; https://github.com/satijalab/sctransform/issues/207)
 
 ```{r naive_merge}
@@ -431,11 +433,11 @@ The code chunk below is for FastMNN integration after the **standard normalizati
 #-----------------------------------------------
 # STEP 10: FastMNN Integration
 #-----------------------------------------------
+DefaultAssay(merged_seurat) <- "RNA"
 
 merged_seurat <- IntegrateLayers(
   object = merged_seurat,
   method = FastMNNIntegration,
-  normalization.method = "RNA",
   orig.reduction = "pca",
   new.reduction = "integrated.mnn",
   verbose = FALSE
@@ -451,6 +453,8 @@ merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.mnn", dims = 1:3
  
 cat("Clustering complete:", length(unique(merged_seurat$fastmnn_clusters)), "clusters\n")
 # FastMNN integration complete: 20 clusters
+
+DefaultAssay(merged_seurat) <- "SCT" # back to previous state
 
 saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
 ```

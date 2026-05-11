@@ -92,6 +92,69 @@ merged_seurat <- readRDS(file.path(integr.dir,"integrated_data",merged_integrati
 
 ```
 
+## Visual comparison of UMAPs
+
+```{r umap_comparison}
+#-----------------------------------------------
+# STEP 11: Generate comparison UMAPs
+#-----------------------------------------------
+ 
+cat("\n=== Generating Comparison Plots ===\n")
+ 
+# Create a function to make standardized UMAP plots
+make_comparison_plot <- function(seurat_obj, reduction_name, title, group_by = "sample_id", colors = NULL) {
+  p <- DimPlot(seurat_obj, reduction = reduction_name, group.by = group_by, pt.size = 0.05) +
+    ggtitle(title) +
+    theme(plot.title = element_text(face = "bold", size = 12),
+          legend.text = element_text(size = 7),
+          legend.key.size = unit(0.3, "cm"))
+ 
+  # Apply custom colors if provided
+  if (!is.null(colors)) {
+    p <- p + scale_color_manual(values = colors)
+  }
+ 
+  return(p)
+}
+ 
+# UMAPs colored by sample (assesses mixing)
+p_sample_naive <- make_comparison_plot(merged_naive, "umap", "Naive Merge", 
+                                       colors = sample_colors)
+p_sample_cca <- make_comparison_plot(merged_seurat, "umap.cca", "CCA", 
+                                     colors = sample_colors)
+p_sample_rpca <- make_comparison_plot(merged_seurat, "umap.rpca", "RPCA", 
+                                      colors = sample_colors)
+p_sample_harmony <- make_comparison_plot(merged_seurat, "umap.harmony", "Harmony", 
+                                         colors = sample_colors)
+p_sample_mnn <- make_comparison_plot(merged_seurat, "umap.mnn", "FastMNN", 
+                                     colors = sample_colors)
+ 
+# Combine sample-colored UMAPs
+combined_samples <- (p_sample_naive | p_sample_cca | p_sample_rpca) / 
+                    (p_sample_harmony | p_sample_mnn | plot_spacer())
+ 
+ggsave(file.path(integr.dir,"plots/integration_comparison/02_integration_by_sample.png"), 
+       combined_samples, width = 16, height = 12, dpi = 300)
+ 
+# UMAPs colored by condition (assesses biological preservation)
+p_cond_naive <- make_comparison_plot(merged_naive, "umap", "Naive Merge", "condition", 
+                                     colors = condition_colors)
+p_cond_cca <- make_comparison_plot(integrated_cca, "umap.cca", "CCA", "condition", 
+                                   colors = condition_colors)
+p_cond_rpca <- make_comparison_plot(integrated_rpca, "umap.rpca", "RPCA", "condition", 
+                                    colors = condition_colors)
+p_cond_harmony <- make_comparison_plot(integrated_harmony, "umap.harmony", "Harmony", "condition", 
+                                       colors = condition_colors)
+p_cond_mnn <- make_comparison_plot(integrated_fastmnn, "umap.mnn", "FastMNN", "condition", 
+                                   colors = condition_colors)
+ 
+# Combine condition-colored UMAPs
+combined_conditions <- (p_cond_naive | p_cond_cca | p_cond_rpca) /
+                       (p_cond_harmony | p_cond_mnn | plot_spacer())
+ 
+ggsave(file.path(integr.dir,"plots/integration_comparison/03_integration_by_condition.png"),
+       combined_conditions, width = 16, height = 12, dpi = 300)
+```
 ## R sessionInfo
 
 ```{r export_sessionInfo}

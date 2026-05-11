@@ -1,5 +1,6 @@
 ---
 title: "ngs101_scRNAseq_walkthrough_3 - Part 1. Merge and prepare integration"
+subtitle: "Subset merged naive object to facilitate integration evaluation"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 output:
@@ -53,7 +54,7 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
+options(future.globals.maxSize = 20 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
  
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
@@ -246,25 +247,25 @@ condition_colors <- c(
  
 # UMAP colored by sample - shows batch effects
 p1_naive <- DimPlot(merged_naive, reduction = "umap", group.by = "sample_id", 
-                     pt.size = 0.05, cols = sample_colors) +
+                     pt.size = 0.05, cols = sample_colors, shuffle = TRUE) +
   ggtitle("Naive Merge: Colored by Sample") +
   theme(legend.position = "right", legend.text = element_text(size = 8))
  
 # UMAP colored by condition
 p2_naive <- DimPlot(merged_naive, reduction = "umap", group.by = "condition",
-                     pt.size = 0.05, cols = condition_colors) +
+                     pt.size = 0.05, cols = condition_colors, shuffle = TRUE) +
   ggtitle("Naive Merge: Colored by Condition")
  
 # UMAP colored by clusters
 p3_naive <- DimPlot(merged_naive, reduction = "umap", group.by = "seurat_clusters",
-                     pt.size = 0.05, label = TRUE, label.size = 5) +
+                     pt.size = 0.05, shuffle = TRUE, label = TRUE, label.size = 5) +
   ggtitle("Naive Merge: Clusters") +
   NoLegend()
  
 # Split by sample to see separation
 p4_naive <- DimPlot(merged_naive, reduction = "umap", group.by = "condition",
                      split.by = "sample_id", pt.size = 0.05, ncol = 4, 
-                     cols = condition_colors) +
+                     cols = condition_colors, shuffle = TRUE) +
   ggtitle("Naive Merge: Split by Sample") +
   theme(strip.text = element_text(size = 9, face = "bold"))
  

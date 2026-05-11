@@ -1,5 +1,6 @@
 ---
 title: "ngs101_scRNAseq_walkthrough_3 - Part 2. Compare integration methods and select"
+subtitle: "Subset from merged naive object to facilitate integration evaluation"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 output:
@@ -53,7 +54,7 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
+options(future.globals.maxSize = 20 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
  
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
@@ -72,7 +73,7 @@ dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 
 # Object file names from Part 1 integration analysis
 merged_naive.file <- "merged_naive.rds"
-merged_integrations.file <- "merged_seurat_with_integrations.rds"
+merged_integrations.file <- "merged_seurat_subset_with_integrations.rds"
 
 # Set random seed for reproducibility
 set.seed(27)
@@ -88,7 +89,7 @@ theme_set(theme_classic(base_size = 12))
 cat("Reading in merged_naive Seurat object:",merged_naive.file,"\n")
 merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
 cat("Reading in merged Seurat object with integrations:",merged_integrations.file,"\n")
-merged_seurat <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
+merged_seurat_subset <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
 
 ```
 
@@ -99,7 +100,7 @@ merged_seurat <- readRDS(file.path(integr.dir,"integrated_data",merged_integrati
 # STEP 11: Generate comparison UMAPs
 #-----------------------------------------------
 
-sample_ids <- unique(merged_seurat@meta.data$sample_id)
+sample_ids <- unique(merged_seurat_subset@meta.data$sample_id)
 
 # Define color palettes for visualization
 # 8 samples need 8 distinct, visible colors
@@ -136,39 +137,39 @@ make_comparison_plot <- function(seurat_obj, reduction_name, title, group_by = "
 # UMAPs colored by sample (assesses mixing)
 p_sample_naive <- make_comparison_plot(merged_naive, "umap", "Naive Merge", 
                                        colors = sample_colors)
-p_sample_cca <- make_comparison_plot(merged_seurat, "umap.cca", "CCA", 
+p_sample_cca <- make_comparison_plot(merged_seurat_subset, "umap.cca", "CCA", 
                                      colors = sample_colors)
-p_sample_rpca <- make_comparison_plot(merged_seurat, "umap.rpca", "RPCA", 
+p_sample_rpca <- make_comparison_plot(merged_seurat_subset, "umap.rpca", "RPCA", 
                                       colors = sample_colors)
-p_sample_harmony <- make_comparison_plot(merged_seurat, "umap.harmony", "Harmony", 
+p_sample_harmony <- make_comparison_plot(merged_seurat_subset, "umap.harmony", "Harmony", 
                                          colors = sample_colors)
-p_sample_mnn <- make_comparison_plot(merged_seurat, "umap.mnn", "FastMNN", 
+p_sample_mnn <- make_comparison_plot(merged_seurat_subset, "umap.mnn", "FastMNN", 
                                      colors = sample_colors)
  
 # Combine sample-colored UMAPs
 (combined_samples <- (p_sample_naive | p_sample_cca | p_sample_rpca) / 
                     (p_sample_harmony | p_sample_mnn | plot_spacer()))
  
-ggsave(file.path(integr.dir,"plots/integration_comparison/02_integration_by_sample.png"), 
+ggsave(file.path(integr.dir,"plots/integration_comparison/02_integration_by_sample_using_subset.png"), 
        combined_samples, width = 16, height = 12, dpi = 300)
  
 # UMAPs colored by condition (assesses biological preservation)
 p_cond_naive <- make_comparison_plot(merged_naive, "umap", "Naive Merge", "condition", 
                                      colors = condition_colors)
-p_cond_cca <- make_comparison_plot(merged_seurat, "umap.cca", "CCA", "condition", 
+p_cond_cca <- make_comparison_plot(merged_seurat_subset, "umap.cca", "CCA", "condition", 
                                    colors = condition_colors)
-p_cond_rpca <- make_comparison_plot(merged_seurat, "umap.rpca", "RPCA", "condition", 
+p_cond_rpca <- make_comparison_plot(merged_seurat_subset, "umap.rpca", "RPCA", "condition", 
                                     colors = condition_colors)
-p_cond_harmony <- make_comparison_plot(merged_seurat, "umap.harmony", "Harmony", "condition", 
+p_cond_harmony <- make_comparison_plot(merged_seurat_subset, "umap.harmony", "Harmony", "condition", 
                                        colors = condition_colors)
-p_cond_mnn <- make_comparison_plot(merged_seurat, "umap.mnn", "FastMNN", "condition", 
+p_cond_mnn <- make_comparison_plot(merged_seurat_subset, "umap.mnn", "FastMNN", "condition", 
                                    colors = condition_colors)
  
 # Combine condition-colored UMAPs
 (combined_conditions <- (p_cond_naive | p_cond_cca | p_cond_rpca) /
                        (p_cond_harmony | p_cond_mnn | plot_spacer()))
  
-ggsave(file.path(integr.dir,"plots/integration_comparison/03_integration_by_condition.png"),
+ggsave(file.path(integr.dir,"plots/integration_comparison/03_integration_by_condition_using_subset.png"),
        combined_conditions, width = 16, height = 12, dpi = 300)
 ```
 
@@ -212,10 +213,10 @@ calculate_mixing_metric <- function(seurat_obj, group_by = "sample_id", reductio
 # Calculate for all methods
 methods_list <- list(
   "Naive" = list(obj = merged_naive, reduction = "umap"),
-  "CCA" = list(obj = merged_seurat, reduction = "umap.cca"),
-  "RPCA" = list(obj = merged_seurat, reduction = "umap.rpca"),
-  "Harmony" = list(obj = merged_seurat, reduction = "umap.harmony"),
-  "FastMNN" = list(obj = merged_seurat, reduction = "umap.mnn")
+  "CCA" = list(obj = merged_seurat_subset, reduction = "umap.cca"),
+  "RPCA" = list(obj = merged_seurat_subset, reduction = "umap.rpca"),
+  "Harmony" = list(obj = merged_seurat_subset, reduction = "umap.harmony"),
+  "FastMNN" = list(obj = merged_seurat_subset, reduction = "umap.mnn")
 )
  
 # Calculate mixing metrics
@@ -235,7 +236,7 @@ cat("(Higher mixing score = better sample mixing)\n\n")
 print(mixing_results)
  
 # Save metrics
-write.csv(mixing_results, "metadata/integration_comparison_metrics.csv", row.names = FALSE)
+write.csv(mixing_results, "metadata/integration_comparison_metrics_using_subset.csv", row.names = FALSE)
  
 # Visualize mixing scores
 p_mixing <- ggplot(mixing_results, aes(x = reorder(method, -mixing_score), y = mixing_score, fill = method)) +
@@ -249,7 +250,7 @@ p_mixing <- ggplot(mixing_results, aes(x = reorder(method, -mixing_score), y = m
   scale_fill_brewer(palette = "Set2")
 
 print(p_mixing)
-ggsave("plots/integration_comparison/04_mixing_scores.png", p_mixing, 
+ggsave("plots/integration_comparison/04_mixing_scores_using_subset.png", p_mixing, 
        width = 10, height = 6, dpi = 300)
 ```
 
@@ -323,7 +324,7 @@ p_tradeoff <- ggplot(mixing_results, aes(x = mixing_score, y = condition_separat
   scale_color_brewer(palette = "Set2")
 
 print(p_tradeoff)
-ggsave("plots/integration_comparison/05_mixing_vs_preservation.png", p_tradeoff,
+ggsave("plots/integration_comparison/05_mixing_vs_preservation_using_subset.png", p_tradeoff,
        width = 10, height = 7, dpi = 300)
 ```
 
@@ -352,12 +353,15 @@ for (i in 1:nrow(mixing_results)) {
 chosen_method <- mixing_results$method[1]
 cat("\nRecommended method:", chosen_method, "\n")
 ```
+*Review metrics above* before imnplementing reduction choice in the following code chunks (set to `eval = FALSE` by default)
 
-*Review metrics above* before imnplementing reduction choice in the following code chunk (set to `eval = FALSE` by default)
-
-```{r implement_chosen_reduction, eval = FALSE}
+```{r confirm_chosen_reduction, eval = FALSE}
 # For subsequent analysis, we'll use the best method
 # In most cases, this will be Harmony or CCA
+
+## Option for manual override
+# chosen_method <- "enter_here"
+
 if (chosen_method == "Harmony") {
   chosen_reduction <- "umap.harmony"
 } else if (chosen_method == "CCA") {
@@ -375,7 +379,137 @@ if (chosen_method == "Harmony") {
 }
  
 cat("\nUsing", chosen_method, "for downstream clustering analysis\n")
+```
 
+### Implement chosen integration method on full merged_naive object
+
+```{r integrate_merged_naive_object, eval = FALSE}
+# Implement the chosen method only
+cat("Implementing chosen integration method on merged_naive\n")
+if (chosen_method == "CCA") {
+  merged_seurat_integrated <- IntegrateLayers(
+    object = merged_naive,
+    method = CCAIntegration,
+    orig.reduction = "pca",
+    new.reduction = "integrated.cca",
+    normalization.method = "SCT",
+    dims = 1:30,
+    verbose = TRUW
+  )
+  
+  # Standard downstream workflow
+  merged_seurat_integrated <- FindNeighbors(
+    merged_seurat_integrated,
+    reduction = "integrated.cca",
+    dims = 1:30,
+    verbose = TRUE
+  )
+  merged_seurat_integrated <- FindClusters(
+    merged_seurat_integrated,
+    resolution = 0.6,
+    cluster.name = "cca_clusters",
+    verbose = TRUE
+  )
+  merged_seurat_integrated <- RunUMAP(
+    merged_seurat_integrated,
+    reduction = "integrated.cca",
+    dims = 1:30,
+    reduction.name = "umap.cca",
+    verbose = TRUE
+  )
+  
+  cat("CCA integration complete:", length(unique(
+    merged_seurat_integrated$cca_clusters
+  )), "clusters\n")
+} else if (chosen_method == "RPCA") {
+  merged_seurat_integrated <- IntegrateLayers(
+    object = merged_naive,
+    method = RPCAIntegration,
+    orig.reduction = "pca",
+    new.reduction = "integrated.rpca",
+    normalization.method = "SCT",
+    dims = 1:30,
+    verbose = TRUE
+  )
+  
+  # Standard downstream workflow
+  merged_seurat_integrated <- FindNeighbors(
+    merged_seurat_integrated,
+    reduction = "integrated.rpca",
+    dims = 1:30,
+    verbose = TRUE
+  )
+  merged_seurat_integrated <- FindClusters(
+    merged_seurat_integrated,
+    resolution = 0.6,
+    cluster.name = "rpca_clusters",
+    verbose = TRUE
+  )
+  merged_seurat_integrated <- RunUMAP(
+    merged_seurat_integrated,
+    reduction = "integrated.rpca",
+    dims = 1:30,
+    reduction.name = "umap.rpca",
+    verbose = TRUE
+  )
+  
+  cat("RPCA integration complete:", length(unique(
+    merged_seurat_integrated$rpca_clusters
+  )), "clusters\n")
+} else if (chosen_method == "Harmony") {
+  merged_seurat_integrated <- RunHarmony(merged_naive,
+                            group.by.vars = "sample_id", # covariates for which harmony will remove effect on data
+                            reduction.use = "pca",
+                            dims.use = 1:50,
+                            reduction.save = "integrated.harmony"
+                            )
+  merged_seurat_integrated <- FindNeighbors(merged_seurat_integrated, reduction = "integrated.harmony", dims = 1:30, verbose = TRUE)
+merged_seurat_integrated <- FindClusters(merged_seurat_integrated, resolution = 0.6, cluster.name = "harmony_clusters", verbose = TRUE)
+merged_seurat_subset <- RunUMAP(merged_seurat_integrated, reduction = "integrated.harmony", dims = 1:30,
+                                reduction.name = "umap.harmony", verbose = TRUE)
+ 
+cat("Harmony integration complete:", length(unique(merged_seurat_subset$harmony_clusters)), "clusters\n")
+} else if (chosen_method == "FastMNN") {
+  DefaultAssay(merged_naive) <- "RNA"
+  merged_seurat_integrated <- IntegrateLayers(
+    object = merged_naive,
+    method = FastMNNIntegration,
+  orig.reduction = "pca",
+  new.reduction = "integrated.mnn",
+  verbose = TRUE
+  )
+  
+  # Standard downstream workflow
+  merged_seurat_integrated <- FindNeighbors(
+    merged_seurat_integrated,
+    reduction = "integrated.mnn",
+    dims = 1:30,
+    verbose = TRUE
+  )
+  merged_seurat_integrated <- FindClusters(
+    merged_seurat_integrated,
+    resolution = 0.6,
+    cluster.name = "fastmnn_clusters",
+    verbose = TRUE
+  )
+  merged_seurat_integrated <- RunUMAP(
+    merged_seurat_integrated,
+    reduction = "integrated.mnn",
+    dims = 1:30,
+    reduction.name = "umap.mnn",
+    verbose = TRUE
+  )
+  
+  cat("FastMNN integration complete:", length(unique(
+    merged_seurat_integrated$fastmnn_clusters
+  )), "clusters\n")
+} else if (chosen_method == "Naive") {
+  merged_seurat_integrated <- merged_naive
+}
+
+# Save out integrated object
+cat("Saving Seurat object with chosen integration\n")
+saveRDS(merged_seurat_integrated, file.path(integr.dir,"integrated_data","merged_seurat_chosen_integration.rds"))
 save(chosen_method,
      chosen_reduction,
      file.path(integr.dir,"metadata","chosen_methods.RData"))

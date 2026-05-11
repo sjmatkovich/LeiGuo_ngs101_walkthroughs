@@ -1,0 +1,115 @@
+---
+title: "ngs101_scRNAseq_walkthrough_3 - Part 3. Define optimal clustering resolution and summarize integration"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-3-integration-and-clustering>
+
+## Libraries, directories, previous files, defaults
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+library(BPCells)
+library(glmGamPoi) # speeds up SCTransform
+ 
+# Integration methods
+library(harmony)
+library(batchelor)
+library(SeuratWrappers)
+ 
+# Visualization and data manipulation
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+ 
+# Quality metrics and utilities
+library(FNN)              # K-nearest neighbor calculations for mixing metrics
+library(cluster)          # Silhouette scores for clustering quality
+library(reshape2)         # Data reshaping for visualization
+ 
+# Parallel processing
+library(future)
+options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
+ 
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+# qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
+# if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
+filt.dir <- file.path(base.dir,"filtered_data")
+if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
+integr.dir <- file.path(base.dir, "integration_analysis")
+
+# Create output directories
+dir.create(file.path(integr.dir,"plots"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"plots/integration_comparison"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"plots/clustering"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"integrated_data"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
+
+# Object file names from Parts 1-2 integration analysis
+merged_naive.file <- "merged_naive.rds"
+## Use _with_integrations if integrations were evaluated on the entire merged_naive object
+# merged_integrations.file <- "merged_seurat_with_integrations.rds"
+## Use _chosen_integration if integrations were evaluated on a subset of the merged_naive object and a single integration was implemented on the merged_naive object
+merged_integrations.file <- "merged_seurat_chosen_integration.rds"
+# Set random seed for reproducibility
+set.seed(27)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+```
+
+## Load integration comparison objects from Parts 1-2
+
+```{r step2_load_objs}
+
+cat("Reading in merged_naive Seurat object:",merged_naive.file,"\n")
+merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
+cat("Reading in merged Seurat object with integrations:",merged_integrations.file,"\n")
+merged_seurat_integrated <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
+load(file.path(integr.dir,"metadata","chosen_methods.RData"))
+
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut3_integration_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"tut3_integration_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```
+
+
+
+

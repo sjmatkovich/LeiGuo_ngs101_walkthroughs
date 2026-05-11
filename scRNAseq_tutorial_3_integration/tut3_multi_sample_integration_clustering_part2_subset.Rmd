@@ -512,7 +512,7 @@ cat("Saving Seurat object with chosen integration\n")
 saveRDS(merged_seurat_integrated, file.path(integr.dir,"integrated_data","merged_seurat_chosen_integration.rds"))
 save(chosen_method,
      chosen_reduction,
-     file.path(integr.dir,"metadata","chosen_methods.RData"))
+     file = file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```
 
 ## R sessionInfo

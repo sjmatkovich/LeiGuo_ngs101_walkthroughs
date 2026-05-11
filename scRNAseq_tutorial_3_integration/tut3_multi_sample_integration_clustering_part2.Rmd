@@ -378,7 +378,7 @@ cat("\nUsing", chosen_method, "for downstream clustering analysis\n")
 
 save(chosen_method,
      chosen_reduction,
-     file.path(integr.dir,"metadata","chosen_methods.RData"))
+     file = file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```
 
 ## R sessionInfo

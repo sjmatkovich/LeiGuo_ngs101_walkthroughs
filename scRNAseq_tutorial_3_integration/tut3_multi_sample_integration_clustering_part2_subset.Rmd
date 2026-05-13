@@ -296,6 +296,9 @@ separation_results <- data.frame(
 )
  
 mixing_results$condition_separation <- separation_results$condition_separation
+
+# Save metrics
+write.csv(mixing_results, "metadata/integration_comparison_metrics_using_subset.csv", row.names = FALSE)
  
 cat("\nBiological Signal Preservation:\n")
 cat("(Higher separation = conditions remain distinguishable)\n\n")
@@ -353,7 +356,7 @@ for (i in 1:nrow(mixing_results)) {
 chosen_method <- mixing_results$method[1]
 cat("\nRecommended method:", chosen_method, "\n")
 ```
-*Review metrics above* before imnplementing reduction choice in the following code chunks (set to `eval = FALSE` by default)
+*Review metrics above* before implementing reduction choice in the following code chunks (set to `eval = FALSE` by default)
 
 ```{r confirm_chosen_reduction, eval = FALSE}
 # For subsequent analysis, we'll use the best method
@@ -363,25 +366,25 @@ cat("\nRecommended method:", chosen_method, "\n")
 # chosen_method <- "enter_here"
 
 if (chosen_method == "Harmony") {
-  chosen_reduction <- "umap.harmony"
+  chosen_reduction <- "integrated.harmony"
 } else if (chosen_method == "CCA") {
-  chosen_reduction <- "umap.cca"
+  chosen_reduction <- "integrated.cca"
 } else if (chosen_method == "RPCA") {
-  chosen_reduction <- "umap.rpca"
+  chosen_reduction <- "integrated.rpca"
 } else if (chosen_method == "FastMNN") {
-  chosen_reduction <- "umap.mnn"
+  chosen_reduction <- "integrated.mnn"
 } else if (chosen_method == "Naive") {
-  chosen_reduction <- "umap"
+  chosen_reduction <- "naive"
 } else {
   # Default to CCA if method not found
-  chosen_reduction <- "umap.cca"
+  chosen_reduction <- "integrated.cca"
   cat("Warning: Method not recognized, defaulting to CCA\n")
 }
  
 cat("\nUsing", chosen_method, "for downstream clustering analysis\n")
 ```
 
-### Implement chosen integration method on full merged_naive object
+### Implement and save chosen integration method on full merged_naive object
 
 ```{r integrate_merged_naive_object, eval = FALSE}
 # Implement the chosen method only
@@ -394,7 +397,7 @@ if (chosen_method == "CCA") {
     new.reduction = "integrated.cca",
     normalization.method = "SCT",
     dims = 1:30,
-    verbose = TRUW
+    verbose = TRUE
   )
   
   # Standard downstream workflow
@@ -510,7 +513,8 @@ cat("Harmony integration complete:", length(unique(merged_seurat_subset$harmony_
 # Save out integrated object
 cat("Saving Seurat object with chosen integration\n")
 saveRDS(merged_seurat_integrated, file.path(integr.dir,"integrated_data","merged_seurat_chosen_integration.rds"))
-save(chosen_method,
+save(mixing_results,
+     chosen_method,
      chosen_reduction,
      file = file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```

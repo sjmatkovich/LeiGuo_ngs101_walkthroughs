@@ -37,6 +37,9 @@ library(glmGamPoi) # speeds up SCTransform
 library(harmony)
 library(batchelor)
 library(SeuratWrappers)
+
+# Silhouette scoring
+library(cluster)
  
 # Visualization and data manipulation
 library(ggplot2)
@@ -53,7 +56,7 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
+options(future.globals.maxSize = 20 * 1024^3)  # Increase to 20GB for datasets with large objects
  
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
@@ -72,10 +75,13 @@ dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 
 # Object file names from Parts 1-2 integration analysis
 merged_naive.file <- "merged_naive.rds"
+
 ## Use _with_integrations if integrations were evaluated on the entire merged_naive object
 # merged_integrations.file <- "merged_seurat_with_integrations.rds"
+
 ## Use _chosen_integration if integrations were evaluated on a subset of the merged_naive object and a single integration was implemented on the merged_naive object
 merged_integrations.file <- "merged_seurat_chosen_integration.rds"
+
 # Set random seed for reproducibility
 set.seed(27)
 
@@ -87,11 +93,352 @@ theme_set(theme_classic(base_size = 12))
 
 ```{r step2_load_objs}
 
-cat("Reading in merged_naive Seurat object:",merged_naive.file,"\n")
-merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
-cat("Reading in merged Seurat object with integrations:",merged_integrations.file,"\n")
+# cat("Reading in merged_naive Seurat object:",merged_naive.file,"\n")
+# merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
+
+cat("Reading in merged Seurat object with integration:",merged_integrations.file,"\n")
 merged_seurat_integrated <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
+
 load(file.path(integr.dir,"metadata","chosen_methods.RData"))
+```
+
+## Examine clustering at multiple resolutions
+
+If using `RNA` assay rather than `SCT`, change `_snn_res` label in cluster calculator and renaming function below
+
+```{r multiple_resolution_clusters, fig.width = 14, fig.height = 14}
+
+#-----------------------------------------------
+# STEP 15: Perform clustering at multiple resolutions
+#-----------------------------------------------
+ 
+# Test multiple resolutions
+resolutions <- c(0.4, 0.6, 0.8, 1.0, 1.2)
+ 
+for (res in resolutions) {
+  merged_seurat_integrated <- FindClusters(
+    merged_seurat_integrated,
+    resolution = res,
+    verbose = TRUE
+  )
+ 
+  n_clusters <- length(unique(merged_seurat_integrated@meta.data[[paste0("SCT_snn_res.", res)]]))
+  cat(sprintf("Resolution %.1f: %d clusters\n", res, n_clusters))
+}
+ 
+# Rename cluster columns for clarity
+colnames(merged_seurat_integrated@meta.data) <- gsub("SCT_snn_res\\.", "clusters_res_", 
+                                              colnames(merged_seurat_integrated@meta.data))
+
+#-----------------------------------------------
+# STEP 16: Visualize clustering results across resolutions
+#-----------------------------------------------
+ 
+# Create UMAP plots for each resolution
+plot_list <- lapply(resolutions, function(res) {
+  cluster_col <- paste0("clusters_res_", res)
+  n_clusters <- length(unique(merged_seurat_integrated@meta.data[[cluster_col]]))
+ 
+  DimPlot(merged_seurat_integrated, 
+          reduction = chosen_reduction,
+          group.by = cluster_col,
+          label = TRUE,
+          label.size = 4,
+          pt.size = 0.3) +
+    ggtitle(paste0("Resolution ", res, " (", n_clusters, " clusters)")) +
+    NoLegend()
+})
+ 
+# Combine plots
+(combined_resolutions <- wrap_plots(plot_list, ncol = 2))
+ggsave(file.path(integr.dir,"plots/clustering/06_multi_resolution_clustering.png"), 
+       combined_resolutions, width = 14, height = 14, dpi = 300)
+```
+
+## Silhouette scores
+
+The Silhouette Score for a data point is calculated as (b - a) / max(a, b), where a is the average distance to points in its own cluster and b is the average distance to points in the nearest neighboring cluster. (Copilot)
+
+```{r silhouette_scores}
+#-----------------------------------------------
+# STEP 17: Evaluate optimal clustering resolution
+#-----------------------------------------------
+
+# Silhouette score measures how similar cells are to their own cluster vs other clusters
+# Values range from -1 to 1 (higher is better)
+
+# Map UMAP reduction name to corresponding integrated reduction name
+# We use integrated space (not UMAP) for silhouette calculation because:
+# - Integrated space preserves more information (30+ dimensions vs UMAP's 2)
+# - Silhouette scores are more meaningful in the space where clustering was performed
+# integrated_reduction <- switch(reduction_final,
+#   "umap.cca" = "integrated.cca",
+#   "umap.rpca" = "integrated.rpca",
+#   "umap.harmony" = "harmony",
+#   "umap.mnn" = "integrated.mnn",
+#   "umap" = "pca"  # Fallback for naive merge
+# )
+ 
+cat("\nEvaluating clustering resolutions using", chosen_reduction, "space\n")
+ 
+# For large datasets (>10,000 cells), subsample for silhouette calculation (use 5000 cells in our case)
+# Computing distance matrices for all cells is computationally prohibitive
+n_cells <- ncol(merged_seurat_integrated)
+max_cells_for_silhouette <- 5000
+ 
+if (n_cells > max_cells_for_silhouette) {
+  cat("Dataset has", n_cells, "cells - subsampling", max_cells_for_silhouette, "cells for silhouette calculation in existing clusters\n")
+  set.seed(42)
+  subsample_idx <- sample(1:n_cells, max_cells_for_silhouette)
+} else {
+  subsample_idx <- 1:n_cells
+}
+ 
+silhouette_scores <- sapply(resolutions, function(res) {
+  cluster_col <- paste0("clusters_res_", res)
+ 
+  # Get clusters for subsampled cells
+  clusters <- as.numeric(merged_seurat_integrated@meta.data[[cluster_col]][subsample_idx])
+ 
+  # Get integrated coordinates for subsampled cells (use first 30 dimensions)
+  coords <- Embeddings(merged_seurat_integrated, reduction = chosen_reduction)[subsample_idx, ]
+  coords <- coords[, 1:min(30, ncol(coords))]
+ 
+  # Calculate silhouette (only if we have at least 2 clusters)
+  if (length(unique(clusters)) > 1) {
+    dist_matrix <- dist(coords)
+    sil <- silhouette(clusters, dist_matrix)
+    mean(sil[, 3])
+  } else {
+    NA  # Return NA if only 1 cluster
+  }
+})
+ 
+# Create resolution comparison table
+resolution_comparison <- data.frame(
+  resolution = resolutions,
+  n_clusters = sapply(resolutions, function(res) {
+    cluster_col <- paste0("clusters_res_", res)
+    length(unique(merged_seurat_integrated@meta.data[[cluster_col]]))
+  }),
+  silhouette_score = silhouette_scores
+)
+ 
+cat("\nClustering resolution comparison:\n")
+print(resolution_comparison)
+
+# Recommend optimal resolution
+# Choose resolution with good silhouette score and interpretable cluster number
+optimal_idx <- which.max(resolution_comparison$silhouette_score)
+optimal_resolution <- resolution_comparison$resolution[optimal_idx]
+ 
+cat("\nRecommended resolution:", optimal_resolution, 
+    "(", resolution_comparison$n_clusters[optimal_idx], "clusters )\n")
+ 
+# Recommended resolution: 0.4 ( 17 clusters )
+```
+
+### Set clusters at the chosen resolution as the default for the object
+
+Choose a different value for `optimal_resolution` if desired
+
+```{r set_default_clusters}
+# Set the optimal clustering as the default
+merged_seurat_integrated$seurat_clusters <- merged_seurat_integrated@meta.data[[paste0("clusters_res_", optimal_resolution)]]
+Idents(merged_seurat_integrated) <- "seurat_clusters"
+```
+
+## Cluster quality assessment
+
+```{r cluster_quality_assessment, fig.width = 12, fig.height = 6}
+#-----------------------------------------------
+# STEP 18: Assess cluster quality and stability
+#-----------------------------------------------
+ 
+# Check cluster sizes
+cluster_sizes <- table(merged_seurat_integrated$seurat_clusters)
+cat("\nCluster sizes:\n")
+print(cluster_sizes)
+ 
+# Identify very small clusters (<1% of cells)
+min_cluster_size <- 0.01 * ncol(merged_seurat_integrated)
+small_clusters <- which(cluster_sizes < min_cluster_size)
+ 
+if (length(small_clusters) > 0) {
+  cat("\n  Warning: Small clusters detected (<1% of cells):\n")
+  print(cluster_sizes[small_clusters])
+  cat("   These may represent rare cell types or over-clustering\n")
+}
+ 
+# Check sample distribution across clusters
+sample_cluster_table <- table(merged_seurat_integrated$seurat_clusters, merged_seurat_integrated$sample_id)
+sample_cluster_pct <- prop.table(sample_cluster_table, margin = 1) * 100
+ 
+# Identify sample-specific clusters (>50% from one sample)
+sample_specific <- apply(sample_cluster_pct, 1, max) > 50
+if (any(sample_specific)) {
+  cat("\n  Warning: Sample-dominated clusters detected (>50% from single sample):\n")
+  print(names(which(sample_specific)))
+  cat("   These may indicate incomplete batch correction\n")
+}
+ 
+# Visualize sample distribution in clusters
+sample_dist_data <- as.data.frame.matrix(sample_cluster_pct)
+sample_dist_data$cluster <- rownames(sample_dist_data)
+sample_dist_long <- reshape2::melt(sample_dist_data, id.vars = "cluster",
+                                    variable.name = "sample", value.name = "percentage")
+ 
+p_sample_dist <- ggplot(sample_dist_long, aes(x = cluster, y = percentage, fill = sample)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Sample Distribution Across Clusters",
+       subtitle = "Check for sample-dominated clusters (poor integration)",
+       x = "Cluster", y = "Percentage of Cells") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+
+print(p_sample_dist)
+ggsave(file.path(integr.dir,"plots/clustering/08_sample_distribution_clusters.png"), p_sample_dist,
+       width = 12, height = 6, dpi = 300)
+ 
+# Check condition distribution
+condition_dist <- table(merged_seurat_integrated$seurat_clusters, merged_seurat_integrated$condition)
+condition_dist_pct <- prop.table(condition_dist, margin = 1) * 100
+ 
+cat("\nCondition distribution across clusters:\n")
+print(round(condition_dist_pct, 1))
+ 
+# Visualize condition distribution
+condition_dist_data <- as.data.frame.matrix(condition_dist_pct)
+condition_dist_data$cluster <- rownames(condition_dist_data)
+condition_dist_long <- reshape2::melt(condition_dist_data, id.vars = "cluster",
+                                      variable.name = "condition", value.name = "percentage")
+ 
+p_condition_dist <- ggplot(condition_dist_long, aes(x = cluster, y = percentage, fill = condition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Condition Distribution Across Clusters",
+       subtitle = "Check if biological conditions are preserved",
+       x = "Cluster", y = "Percentage of Cells") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("Healthy" = "#2E86AB", 
+                                "Post_Treatment" = "#F18F01"))
+
+print(p_condition_dist)
+ggsave(file.path(integr.dir,"plots/clustering/09_condition_distribution_clusters.png"), p_condition_dist,
+       width = 12, height = 6, dpi = 300)
+
+```
+
+## Final integrated and clustered visualization
+
+```{r summary_plots, fig.width = 16, fig.height = 12}
+#-----------------------------------------------
+# STEP 19: Create comprehensive visualization of final results
+#-----------------------------------------------
+ 
+# Define color palettes for visualization
+# 8 samples need 8 distinct, visible colors
+sample_colors <- c(
+  "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",  # Healthy 1-4: Red, Blue, Green, Purple
+  "#FF7F00", "#A65628", "#F781BF", "#999999"   # Post_Patient 1-4: Orange, Brown, Pink, Gray
+)
+names(sample_colors) <- unique(merged_seurat_integrated@meta.data$sample_ids)
+ 
+# 2 conditions need 2 distinct colors
+condition_colors <- c(
+  "Healthy" = "#2E86AB",       # Blue
+  "Post_Treatment" = "#F18F01"  # Orange
+)
+
+# Main UMAP with clusters
+p_final_clusters <- DimPlot(merged_seurat_integrated, 
+                            reduction = chosen_reduction,
+                            group.by = "seurat_clusters",
+                            label = TRUE,
+                            label.size = 5,
+                            pt.size = 0.05) +
+  ggtitle(paste0("Final Clustering (", chosen_method, " Integration)")) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+ 
+# Split by condition to show preservation
+p_by_condition <- DimPlot(merged_seurat_integrated,
+                          reduction = chosen_reduction,
+                          group.by = "seurat_clusters",
+                          split.by = "condition",
+                          label = TRUE,
+                          label.size = 4,
+                          pt.size = 0.05,
+                          ncol = 2) +
+  ggtitle("Clusters by Treatment Condition") +
+  theme(strip.text = element_text(face = "bold"))
+ 
+# Colored by sample (integration quality check)
+p_by_sample <- DimPlot(merged_seurat_integrated,
+                       reduction = chosen_reduction,
+                       group.by = "sample_id",
+                       pt.size = 0.05,
+                       cols = sample_colors) +
+  ggtitle("Sample Mixing (Integration Quality)") +
+  theme(legend.text = element_text(size = 7))
+ 
+# Colored by condition
+p_by_condition_single <- DimPlot(merged_seurat_integrated,
+                                 reduction = chosen_reduction,
+                                 group.by = "condition",
+                                 pt.size = 0.05,
+                                 cols = condition_colors) +
+  ggtitle("Treatment Conditions")
+ 
+# Combine final visualizations
+(combined_final <- (p_final_clusters | p_by_condition_single) /
+                  (p_by_sample | plot_spacer())
+)
+ 
+ggsave(file.path(integr.dir,"plots/clustering/10_final_integrated_clustered.png"), combined_final,
+       width = 16, height = 12, dpi = 300)
+ 
+# Split by condition detailed view
+ggsave(file.path(integr.dir,"plots/clustering/11_clusters_by_condition_split.png"), p_by_condition,
+       width = 18, height = 6, dpi = 300)
+```
+
+## Save out summary of integrated and clustered data
+
+Ensure `mixing_results` data frame from earlier .Rmd was retrieved at earlier `load(file.path(integr.dir,"metadata","chosen_methods.RData"))` step.
+
+```{r summary_output}
+#-----------------------------------------------
+# STEP 20: Save integrated and clustered data
+#-----------------------------------------------
+ 
+cat("\n=== Saving Final Results ===\n")
+ 
+# Join layers for downstream analysis (or delay until future .Rmd module)
+# merged_seurat_integrated <- JoinLayers(merged_seurat_integrated)
+ 
+# Save the final integrated object
+saveRDS(merged_seurat_integrated,
+        file.path(integr.dir,"integrated_data","seurat_integrated_clustered.rds")
+)
+ 
+# Save metadata
+write.csv(merged_seurat_integrated@meta.data, 
+          file.path(integr.dir,"metadata/integrated_cell_metadata.csv"),
+          row.names = TRUE)
+ 
+# Create comprehensive summary
+integration_summary <- data.frame(
+  dataset = "GSE174609",
+  n_samples = length(unique(merged_seurat_integrated$sample_id)),
+  n_cells_total = ncol(merged_seurat_integrated),
+  n_genes = nrow(merged_seurat_integrated),
+  integration_method = chosen_method,
+  optimal_resolution = optimal_resolution,
+  n_clusters = length(unique(merged_seurat_integrated$seurat_clusters)),
+  mixing_score = mixing_results$mixing_score[mixing_results$method == chosen_method],
+  condition_separation = mixing_results$condition_separation[mixing_results$method == chosen_method]
+)
+ 
+write.csv(integration_summary, file.path(integr.dir,"metadata/integration_summary.csv"), row.names = FALSE)
 
 ```
 

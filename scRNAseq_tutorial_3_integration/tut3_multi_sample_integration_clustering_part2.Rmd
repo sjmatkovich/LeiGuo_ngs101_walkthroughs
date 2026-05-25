@@ -1,0 +1,401 @@
+---
+title: "ngs101_scRNAseq_walkthrough_3 - Part 2. Compare integration methods and select"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-3-integration-and-clustering>
+
+## Libraries, directories, defaults
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+library(BPCells)
+library(glmGamPoi) # speeds up SCTransform
+ 
+# Integration methods
+library(harmony)
+library(batchelor)
+library(SeuratWrappers)
+ 
+# Visualization and data manipulation
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+ 
+# Quality metrics and utilities
+library(FNN)              # K-nearest neighbor calculations for mixing metrics
+library(cluster)          # Silhouette scores for clustering quality
+library(reshape2)         # Data reshaping for visualization
+ 
+# Parallel processing
+library(future)
+options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
+ 
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+# qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
+# if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
+filt.dir <- file.path(base.dir,"filtered_data")
+if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
+integr.dir <- file.path(base.dir, "integration_analysis")
+
+# Create output directories
+dir.create(file.path(integr.dir,"plots"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"plots/integration_comparison"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"plots/clustering"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"integrated_data"), showWarnings = FALSE)
+dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
+
+# Object file names from Part 1 integration analysis
+merged_naive.file <- "merged_naive.rds"
+merged_integrations.file <- "merged_seurat_with_integrations.rds"
+
+# Set random seed for reproducibility
+set.seed(27)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+```
+
+## Load integration comparison objects from Part 1
+
+```{r step2_load_objs}
+
+cat("Reading in merged_naive Seurat object:",merged_naive.file,"\n")
+merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
+cat("Reading in merged Seurat object with integrations:",merged_integrations.file,"\n")
+merged_seurat <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
+
+```
+
+## Visual comparison of UMAPs
+
+```{r umap_comparison, fig.width = 16, fig.height = 12}
+#-----------------------------------------------
+# STEP 11: Generate comparison UMAPs
+#-----------------------------------------------
+
+sample_ids <- unique(merged_seurat@meta.data$sample_id)
+
+# Define color palettes for visualization
+# 8 samples need 8 distinct, visible colors
+sample_colors <- c(
+  "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",  # Healthy 1-4: Red, Blue, Green, Purple
+  "#FF7F00", "#A65628", "#F781BF", "#999999"   # Post_Patient 1-4: Orange, Brown, Pink, Gray
+)
+names(sample_colors) <- sample_ids
+ 
+# 2 conditions need 2 distinct colors
+condition_colors <- c(
+  "Healthy" = "#2E86AB",       # Blue
+  "Post_Treatment" = "#F18F01"  # Orange
+)
+
+cat("\n=== Generating Comparison Plots ===\n")
+ 
+# Create a function to make standardized UMAP plots
+make_comparison_plot <- function(seurat_obj, reduction_name, title, group_by = "sample_id", colors = NULL) {
+  p <- DimPlot(seurat_obj, reduction = reduction_name, group.by = group_by, pt.size = 0.05, shuffle = TRUE) + # shuffle randomizes dot plotting order so last plotted group doesn't overlay others
+    ggtitle(title) +
+    theme(plot.title = element_text(face = "bold", size = 12),
+          legend.text = element_text(size = 7),
+          legend.key.size = unit(0.3, "cm"))
+ 
+  # Apply custom colors if provided
+  if (!is.null(colors)) {
+    p <- p + scale_color_manual(values = colors)
+  }
+ 
+  return(p)
+}
+ 
+# UMAPs colored by sample (assesses mixing)
+p_sample_naive <- make_comparison_plot(merged_naive, "umap", "Naive Merge", 
+                                       colors = sample_colors)
+p_sample_cca <- make_comparison_plot(merged_seurat, "umap.cca", "CCA", 
+                                     colors = sample_colors)
+p_sample_rpca <- make_comparison_plot(merged_seurat, "umap.rpca", "RPCA", 
+                                      colors = sample_colors)
+p_sample_harmony <- make_comparison_plot(merged_seurat, "umap.harmony", "Harmony", 
+                                         colors = sample_colors)
+p_sample_mnn <- make_comparison_plot(merged_seurat, "umap.mnn", "FastMNN", 
+                                     colors = sample_colors)
+ 
+# Combine sample-colored UMAPs
+(combined_samples <- (p_sample_naive | p_sample_cca | p_sample_rpca) / 
+                    (p_sample_harmony | p_sample_mnn | plot_spacer()))
+ 
+ggsave(file.path(integr.dir,"plots/integration_comparison/02_integration_by_sample.png"), 
+       combined_samples, width = 16, height = 12, dpi = 300)
+ 
+# UMAPs colored by condition (assesses biological preservation)
+p_cond_naive <- make_comparison_plot(merged_naive, "umap", "Naive Merge", "condition", 
+                                     colors = condition_colors)
+p_cond_cca <- make_comparison_plot(merged_seurat, "umap.cca", "CCA", "condition", 
+                                   colors = condition_colors)
+p_cond_rpca <- make_comparison_plot(merged_seurat, "umap.rpca", "RPCA", "condition", 
+                                    colors = condition_colors)
+p_cond_harmony <- make_comparison_plot(merged_seurat, "umap.harmony", "Harmony", "condition", 
+                                       colors = condition_colors)
+p_cond_mnn <- make_comparison_plot(merged_seurat, "umap.mnn", "FastMNN", "condition", 
+                                   colors = condition_colors)
+ 
+# Combine condition-colored UMAPs
+(combined_conditions <- (p_cond_naive | p_cond_cca | p_cond_rpca) /
+                       (p_cond_harmony | p_cond_mnn | plot_spacer()))
+ 
+ggsave(file.path(integr.dir,"plots/integration_comparison/03_integration_by_condition.png"),
+       combined_conditions, width = 16, height = 12, dpi = 300)
+```
+
+## Quantitative integration metrics
+
+### Mixing metric (LISI)
+
+**How the mixing metric works**: For each cell, we find its k=50 nearest neighbors in the UMAP space and calculate the diversity of samples among those neighbors using the inverse Simpson’s Index. If all neighbors are from different samples (perfect mixing), the score is high. If all neighbors are from the same sample (poor integration), the score is low.
+
+k can be configured below
+
+```{r lisi, fig.width = 10, fig.height = 6}
+#-----------------------------------------------
+# STEP 12: Calculate integration quality metrics
+#-----------------------------------------------
+
+k_param <- 50
+
+# Function to calculate mixing metric (local inverse Simpson's Index)
+# This measures sample diversity in each cell's k-nearest neighborhood
+calculate_mixing_metric <- function(seurat_obj, group_by = "sample_id", reduction = "umap", k = k_param) {
+  # Get embedding
+  embedding <- Embeddings(seurat_obj, reduction = reduction)
+ 
+  # Calculate k-nearest neighbors using FNN package
+  nn_result <- FNN::get.knn(embedding[, 1:2], k = k)
+ 
+  # For each cell, calculate diversity of samples in its neighborhood
+  group_labels <- seurat_obj@meta.data[[group_by]]
+  mixing_scores <- sapply(1:nrow(nn_result$nn.index), function(i) {
+    neighbors <- nn_result$nn.index[i, ]
+    neighbor_groups <- group_labels[neighbors]
+    props <- table(neighbor_groups) / length(neighbor_groups)
+    # Inverse Simpson's Index (higher = more mixed)
+    1 / sum(props^2)
+  })
+ 
+  return(mean(mixing_scores))
+}
+ 
+# Calculate for all methods
+methods_list <- list(
+  "Naive" = list(obj = merged_naive, reduction = "umap"),
+  "CCA" = list(obj = merged_seurat, reduction = "umap.cca"),
+  "RPCA" = list(obj = merged_seurat, reduction = "umap.rpca"),
+  "Harmony" = list(obj = merged_seurat, reduction = "umap.harmony"),
+  "FastMNN" = list(obj = merged_seurat, reduction = "umap.mnn")
+)
+ 
+# Calculate mixing metrics
+mixing_results <- data.frame(
+  method = names(methods_list),
+  mixing_score = sapply(methods_list, function(x) {
+    calculate_mixing_metric(x$obj, group_by = "sample_id", reduction = x$reduction)
+  }),
+  n_clusters = sapply(methods_list, function(x) {
+    length(unique(x$obj$seurat_clusters))
+  })
+)
+ 
+# Display results
+cat("\nIntegration Quality Metrics:\n")
+cat("(Higher mixing score = better sample mixing)\n\n")
+print(mixing_results)
+ 
+# Save metrics
+write.csv(mixing_results, "metadata/integration_comparison_metrics.csv", row.names = FALSE)
+ 
+# Visualize mixing scores
+p_mixing <- ggplot(mixing_results, aes(x = reorder(method, -mixing_score), y = mixing_score, fill = method)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(mixing_score, 2)), vjust = -0.5) +
+  labs(title = "Integration Method Comparison: Sample Mixing",
+       subtitle = "Higher score = better integration (samples mix within cell types)",
+       x = "Integration Method",
+       y = "Mixing Score (Local Inverse Simpson's Index)") +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")
+
+print(p_mixing)
+ggsave("plots/integration_comparison/04_mixing_scores.png", p_mixing, 
+       width = 10, height = 6, dpi = 300)
+```
+
+### Biological signal (treatment group) preservation
+
+Find condition centers: Calculate the average UMAP position for all Healthy cells and all Post_Treatment cells
+
+Measure separation: Calculate the distance between these two centers
+
+Interpret the distance:
+
+High distance = Conditions are well-separated (biological signal preserved) ✓
+
+Low distance = Conditions overlap (might have over-integrated, losing biology) ⚠️
+
+```{r signal_preservation}
+#-----------------------------------------------
+# STEP 13: Assess biological signal preservation
+#-----------------------------------------------
+ 
+# Function to test if conditions are still distinguishable after integration
+# Uses UMAP distances between conditions
+assess_condition_separation <- function(seurat_obj, reduction) {
+  umap_coords <- seurat_obj[[reduction]]@cell.embeddings[, 1:2]
+  conditions <- seurat_obj$condition
+ 
+  # Calculate mean UMAP position for each condition
+  condition_centers <- aggregate(umap_coords, by = list(conditions), FUN = mean)
+ 
+  # Calculate pairwise distances between condition centers
+  dist_matrix <- dist(condition_centers[, -1])
+  mean_dist <- mean(dist_matrix)
+ 
+  return(mean_dist)
+}
+ 
+# Calculate for all methods
+separation_results <- data.frame(
+  method = names(methods_list),
+  condition_separation = sapply(methods_list, function(x) {
+    assess_condition_separation(x$obj, x$reduction)
+  })
+)
+ 
+mixing_results$condition_separation <- separation_results$condition_separation
+ 
+cat("\nBiological Signal Preservation:\n")
+cat("(Higher separation = conditions remain distinguishable)\n\n")
+print(mixing_results[, c("method", "mixing_score", "condition_separation", "n_clusters")])
+```
+
+### Plot tradeoff
+
+Ideal integration: High mixing + Moderate separation
+
+Over-integration: High mixing + Low separation (conditions lost)
+
+Under-integration: Low mixing + High separation (batches not corrected)
+
+```{r mix_preserve_plot, fig.width = 10, fig.height=7}
+
+# Visualize the trade-off
+p_tradeoff <- ggplot(mixing_results, aes(x = mixing_score, y = condition_separation, label = method)) +
+  geom_point(size = 4, aes(color = method)) +
+  geom_text_repel(size = 4, box.padding = 0.5) +
+  labs(title = "Integration Quality: Mixing vs Biological Preservation",
+       subtitle = "Ideal: Upper right (high mixing + preserved biology)",
+       x = "Sample Mixing Score (higher = better integration)",
+       y = "Condition Separation (higher = preserved biology)") +
+  theme(legend.position = "none") +
+  scale_color_brewer(palette = "Set2")
+
+print(p_tradeoff)
+ggsave("plots/integration_comparison/05_mixing_vs_preservation.png", p_tradeoff,
+       width = 10, height = 7, dpi = 300)
+```
+
+## Choose between evaluated integration methods
+
+The primary ranking method below is the `mixing_score` (batch correction) rather than condition separation.
+
+```{r integration_choice}
+#-----------------------------------------------
+# STEP 14: Select optimal integration method
+#-----------------------------------------------
+ 
+# Rank methods by mixing score (primary criterion)
+mixing_results <- mixing_results[order(-mixing_results$mixing_score), ]
+ 
+cat("\nMethod ranking (by sample mixing):\n")
+for (i in 1:nrow(mixing_results)) {
+  cat(sprintf("  %d. %s (mixing: %.2f, separation: %.2f)\n",
+              i, 
+              mixing_results$method[i],
+              mixing_results$mixing_score[i],
+              mixing_results$condition_separation[i]))
+}
+ 
+# Select top method
+chosen_method <- mixing_results$method[1]
+cat("\nRecommended method:", chosen_method, "\n")
+```
+
+*Review metrics above* before imnplementing reduction choice in the following code chunk (set to `eval = FALSE` by default)
+
+```{r implement_chosen_reduction, eval = FALSE}
+# For subsequent analysis, we'll use the best method
+# In most cases, this will be Harmony or CCA
+if (chosen_method == "Harmony") {
+  chosen_reduction <- "umap.harmony"
+} else if (chosen_method == "CCA") {
+  chosen_reduction <- "umap.cca"
+} else if (chosen_method == "RPCA") {
+  chosen_reduction <- "umap.rpca"
+} else if (chosen_method == "FastMNN") {
+  chosen_reduction <- "umap.mnn"
+} else if (chosen_method == "Naive") {
+  chosen_reduction <- "umap"
+} else {
+  # Default to CCA if method not found
+  chosen_reduction <- "umap.cca"
+  cat("Warning: Method not recognized, defaulting to CCA\n")
+}
+ 
+cat("\nUsing", chosen_method, "for downstream clustering analysis\n")
+
+save(chosen_method,
+     chosen_reduction,
+     file = file.path(integr.dir,"metadata","chosen_methods.RData"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut3_integration_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"tut3_integration_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```
+
+
+
+

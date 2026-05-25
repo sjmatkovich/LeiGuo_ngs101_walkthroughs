@@ -21,6 +21,9 @@
 # RStudio files
 .Rproj.user/
 
+# Renv packges
+renv/
+
 # produced vignettes
 vignettes/*.html
 vignettes/*.pdf

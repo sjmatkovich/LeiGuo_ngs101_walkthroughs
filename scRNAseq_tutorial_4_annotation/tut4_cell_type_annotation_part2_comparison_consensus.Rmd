@@ -1,0 +1,610 @@
+---
+title: "ngs101_scRNAseq_walkthrough_4 - Part 2. Compare annotation methods and build consensus"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-4-cell-type-identification/>
+
+Part 1 of this walkthrough produced four independent cell type annotations
+for the same clusters: `manual_annotation`, `singler_annotation`,
+`sctype_annotation`, and `sccatch_annotation`. This part compares them
+systematically (confusion matrices, Sankey diagrams, side-by-side UMAPs),
+then builds a manual consensus and saves the final annotated object.
+
+**Why not automate the consensus step?** The four methods use different
+naming conventions for the same biology - e.g. "CD4+ T cells" (manual),
+"T cells, CD4+" (SingleR), "T cells" (scType), and "CD4 T cell" (scCATCH)
+are all the same call, but a program comparing strings would see four
+different labels. Reconciling this reliably requires a human read of the
+comparison tables produced below.
+
+## Libraries, directories, and Part 1 object
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(ggrepel)
+library(ggalluvial)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(scales)
+library(viridis)
+
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+annot.dir <- file.path(base.dir, "cell_type_annotation")
+
+dir.create(file.path(annot.dir,"plots/method_comparison"), showWarnings = FALSE, recursive = TRUE)
+dir.create(file.path(annot.dir,"annotations"), showWarnings = FALSE)
+
+# Set random seed for reproducibility
+set.seed(42)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+```
+
+```{r step1b_load_part1}
+# Object saved at the end of Part 1, carrying all four annotation columns
+merged_seurat_integrated <- readRDS(
+  file.path(annot.dir,"annotations","seurat_annotated_methods.rds")
+)
+
+load(file.path(base.dir,"integration_analysis","metadata","chosen_methods.RData"))
+
+cat("Loaded object with", ncol(merged_seurat_integrated), "cells\n")
+cat("Annotation columns present:",
+    paste(intersect(c("manual_annotation","singler_annotation",
+                       "sctype_annotation","sccatch_annotation"),
+                     colnames(merged_seurat_integrated@meta.data)),
+          collapse = ", "), "\n")
+```
+
+## Comparing annotation methods
+
+### Confusion matrices
+
+**Bug fix vs. the original tutorial**: the source article's
+`create_confusion_matrix` function is written without a `return()`
+statement or closing brace, so it does not actually work as published. The
+version below adds `return(conf_table)` so the function runs correctly.
+
+```{r step15_confusion_matrices}
+
+#-----------------------------------------------
+# STEP 15: Generate confusion matrices
+#-----------------------------------------------
+
+# Function to create confusion matrix
+create_confusion_matrix <- function(method1_labels, method2_labels,
+                                   method1_name, method2_name) {
+  conf_table <- table(
+    Method1 = method1_labels,
+    Method2 = method2_labels
+  )
+  return(conf_table)
+}
+
+# Compare each automated method to manual
+conf_manual_vs_singler <- create_confusion_matrix(
+  merged_seurat_integrated$manual_annotation,
+  merged_seurat_integrated$singler_annotation,
+  "Manual", "SingleR"
+)
+
+conf_manual_vs_sctype <- create_confusion_matrix(
+  merged_seurat_integrated$manual_annotation,
+  merged_seurat_integrated$sctype_annotation,
+  "Manual", "scType"
+)
+
+conf_manual_vs_sccatch <- create_confusion_matrix(
+  merged_seurat_integrated$manual_annotation,
+  merged_seurat_integrated$sccatch_annotation,
+  "Manual", "scCATCH"
+)
+
+print(conf_manual_vs_singler)
+print(conf_manual_vs_sctype)
+print(conf_manual_vs_sccatch)
+
+# Save confusion matrices
+write.csv(as.data.frame(conf_manual_vs_singler),
+          file.path(annot.dir,"annotations/confusion_matrix_manual_vs_singler.csv"),
+          row.names = FALSE)
+write.csv(as.data.frame(conf_manual_vs_sctype),
+          file.path(annot.dir,"annotations/confusion_matrix_manual_vs_sctype.csv"),
+          row.names = FALSE)
+write.csv(as.data.frame(conf_manual_vs_sccatch),
+          file.path(annot.dir,"annotations/confusion_matrix_manual_vs_sccatch.csv"),
+          row.names = FALSE)
+```
+
+Rows are Method 1 labels, columns are Method 2 labels, and cell values are
+cell counts. Perfect agreement between two methods on a given manual label
+shows up as nearly all cells falling in a single column; partial agreement
+shows a dominant column with some scatter; disagreement shows counts spread
+thinly across many columns with no dominant category.
+
+### Sankey diagrams
+
+```{r step16_sankey_diagrams, fig.width = 12, fig.height = 10}
+
+#-----------------------------------------------
+# STEP 16: Create Sankey diagrams
+#-----------------------------------------------
+
+# Function to prepare Sankey data
+prepare_sankey_data <- function(method1_labels, method2_labels,
+                               method1_name, method2_name) {
+  sankey_df <- data.frame(
+    Method1 = method1_labels,
+    Method2 = method2_labels
+  ) %>%
+    group_by(Method1, Method2) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    mutate(Comparison = paste(method1_name, "vs", method2_name))
+
+  return(sankey_df)
+}
+
+# Prepare data for each comparison
+sankey_manual_singler <- prepare_sankey_data(
+  merged_seurat_integrated$manual_annotation,
+  merged_seurat_integrated$singler_annotation,
+  "Manual", "SingleR"
+)
+
+sankey_manual_sctype <- prepare_sankey_data(
+  merged_seurat_integrated$manual_annotation,
+  merged_seurat_integrated$sctype_annotation,
+  "Manual", "scType"
+)
+
+sankey_manual_sccatch <- prepare_sankey_data(
+  merged_seurat_integrated$manual_annotation,
+  merged_seurat_integrated$sccatch_annotation,
+  "Manual", "scCATCH"
+)
+
+# Function to create Sankey plot
+create_sankey_plot <- function(sankey_data, method1_name, method2_name) {
+  p <- ggplot(sankey_data,
+              aes(axis1 = Method1, axis2 = Method2, y = Count)) +
+    geom_alluvium(aes(fill = Method1), width = 1/12, alpha = 0.7) +
+    geom_stratum(width = 1/12, fill = "white", color = "grey") +
+    geom_text(stat = "stratum", aes(label = after_stat(stratum)),
+              size = 3, fontface = "bold") +
+    scale_x_discrete(limits = c(method1_name, method2_name),
+                     expand = c(0.05, 0.05)) +
+    labs(title = paste(method1_name, "vs", method2_name),
+         subtitle = "Straight flows = agreement | Crossed flows = disagreement",
+         y = "Number of Cells") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank(),
+          plot.title = element_text(face = "bold"))
+
+  return(p)
+}
+
+# Create Sankey plots
+p_sankey_singler <- create_sankey_plot(sankey_manual_singler, "Manual", "SingleR")
+ggsave(file.path(annot.dir,"plots/method_comparison/14_sankey_manual_vs_singler.png"),
+       p_sankey_singler, width = 12, height = 10, dpi = 300)
+
+p_sankey_sctype <- create_sankey_plot(sankey_manual_sctype, "Manual", "scType")
+ggsave(file.path(annot.dir,"plots/method_comparison/15_sankey_manual_vs_sctype.png"),
+       p_sankey_sctype, width = 12, height = 10, dpi = 300)
+
+p_sankey_sccatch <- create_sankey_plot(sankey_manual_sccatch, "Manual", "scCATCH")
+ggsave(file.path(annot.dir,"plots/method_comparison/16_sankey_manual_vs_sccatch.png"),
+       p_sankey_sccatch, width = 12, height = 10, dpi = 300)
+
+p_sankey_singler
+p_sankey_sctype
+p_sankey_sccatch
+```
+
+Straight vertical flows indicate agreement between the two methods; crossed
+or diagonal flows indicate disagreement. Flow thickness encodes cell count,
+so many thin scattered flows mean widespread disagreement, while a few
+thick flows mean strong consensus. Watch particularly for thick flows
+landing on "Unknown" or other ambiguous labels - these clusters need
+follow-up in the manual comparison workflow below.
+
+### Side-by-side UMAP comparison
+
+```{r step17_umap_comparison, fig.width = 18, fig.height = 14}
+
+#-----------------------------------------------
+# STEP 17: Create comprehensive UMAP comparison
+#-----------------------------------------------
+
+p_manual_comp <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "manual_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "Manual") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+p_singler_comp <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "singler_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "SingleR (Monaco)") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+p_sctype_comp <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "sctype_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "scType (Markers)") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+p_sccatch_comp <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "sccatch_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "scCATCH (Tissue DB)") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+# Combine all four methods
+(p_all_methods <- (p_manual_comp | p_singler_comp) /
+                 (p_sctype_comp | p_sccatch_comp))
+
+ggsave(file.path(annot.dir,"plots/method_comparison/17_all_methods_comparison.png"),
+       p_all_methods, width = 18, height = 14, dpi = 300)
+```
+
+Look for spatial coherence (contiguous regions rather than scattered
+"islands"), consistent boundaries between methods, naming differences that
+are really the same biology (e.g. "T cells, CD4+" vs "CD4+ T cells"), and
+problem areas - regions where every method disagrees, method-unique labels
+that might be errors (or genuine discoveries), and "Unknown" regions that
+will need manual curation.
+
+## Building consensus annotations: manual comparison strategy
+
+### Step 1: export annotations for manual review
+
+```{r step18_export_comparison}
+
+#-----------------------------------------------
+# STEP 18: Export annotations for manual comparison
+#-----------------------------------------------
+
+# Create comprehensive annotation table
+annotation_comparison <- data.frame(
+  cell_barcode = colnames(merged_seurat_integrated),
+  cluster = merged_seurat_integrated$seurat_clusters,
+  manual = merged_seurat_integrated$manual_annotation,
+  singler = merged_seurat_integrated$singler_annotation,
+  sctype = merged_seurat_integrated$sctype_annotation,
+  sccatch = merged_seurat_integrated$sccatch_annotation,
+  sample_id = merged_seurat_integrated$sample_id,
+  condition = merged_seurat_integrated$condition,
+  stringsAsFactors = FALSE
+)
+
+# Export to CSV for manual review
+write.csv(annotation_comparison,
+          file.path(annot.dir,"annotations/all_methods_comparison.csv"),
+          row.names = FALSE)
+
+# Create cluster-level summary (easier to review)
+cluster_summary <- annotation_comparison %>%
+  group_by(cluster) %>%
+  summarise(
+    n_cells = n(),
+    manual_type = names(sort(table(manual), decreasing = TRUE))[1],
+    singler_type = names(sort(table(singler), decreasing = TRUE))[1],
+    sctype_type = names(sort(table(sctype), decreasing = TRUE))[1],
+    sccatch_type = names(sort(table(sccatch), decreasing = TRUE))[1],
+    .groups = "drop"
+  )
+
+write.csv(cluster_summary,
+          file.path(annot.dir,"annotations/cluster_level_comparison.csv"),
+          row.names = FALSE)
+
+cluster_summary
+```
+
+This produces two files: a cell-level table (every cell with all four
+method labels, useful for detailed downstream analysis) and a
+cluster-level summary (one row per cluster with the modal/dominant label
+per method), which is the practical starting point for the manual review
+below.
+
+### Step 2: manual comparison workflow
+
+This step has no code - it is a spreadsheet-based decision process, done
+outside R:
+
+1. Open `annotations/cluster_level_comparison.csv` in Excel or Google
+   Sheets.
+2. Add a `consensus_annotation` column for the final decision on each
+   cluster.
+3. Apply these decision rules per cluster:
+   - **All 4 methods agree** (same biology, possibly different naming) ->
+     accept the consensus label. Example: Manual "CD4+ T cells", SingleR
+     "T cells, CD4+", scType "T cells", scCATCH "CD4 T cell" -> consensus
+     "CD4+ T cells".
+   - **3 of 4 agree** -> usually accept the majority label, but check
+     marker expression (Part 1, Steps 6-7) to confirm before finalizing -
+     e.g. if 3 methods say "B cells" and 1 says "Unknown", verify with
+     `CD79A`/`MS4A1`.
+   - **2 of 4 agree (split decision)** -> requires investigation: return to
+     the violin plots and `FindAllMarkers` results, check which markers
+     support each candidate assignment, choose the one with the strongest
+     evidence, and document the reasoning in a Notes column.
+   - **All 4 disagree** -> manual investigation required: the cluster may
+     be a mixed population needing higher clustering resolution, a
+     transitional state, low-quality cells that should have been filtered
+     during QC, or a genuinely novel population needing literature
+     research.
+4. Save the edited spreadsheet back to CSV (overwriting or renaming
+   `cluster_level_comparison.csv`) before continuing to Step 3.
+
+### Step 3: import consensus and finalize
+
+```{r step19_import_consensus}
+
+#-----------------------------------------------
+# STEP 19: Import consensus annotations
+#-----------------------------------------------
+
+# Read your manually edited cluster consensus file
+# (Save your Excel/Google Sheets file as CSV first)
+cluster_consensus <- read.csv(file.path(annot.dir,"annotations/cluster_level_comparison.csv"),
+                              stringsAsFactors = FALSE)
+
+# Create mapping from cluster to consensus annotation
+cluster_to_consensus <- setNames(
+  cluster_consensus$consensus_annotation,  # Column you created
+  cluster_consensus$cluster
+)
+
+# Apply consensus to all cells
+merged_seurat_integrated$final_annotation <- unname(cluster_to_consensus[
+  as.character(merged_seurat_integrated$seurat_clusters)
+])
+
+# Visualize final consensus
+p_consensus <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "final_annotation",
+  label = TRUE,
+  label.size = 4,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("Final Consensus Annotation") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+ggsave(file.path(annot.dir,"plots/method_comparison/18_final_consensus_annotation.png"),
+       p_consensus, width = 11, height = 8, dpi = 300)
+
+# Split by condition to check biological validity
+p_consensus_split <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "final_annotation",
+  split.by = "condition",
+  pt.size = 0.1,
+  ncol = 2
+) +
+  ggtitle("Final Consensus by Condition")
+
+ggsave(file.path(annot.dir,"plots/method_comparison/19_consensus_by_condition.png"),
+       p_consensus_split, width = 14, height = 6, dpi = 300)
+
+p_consensus
+```
+
+Before moving on, check the final plots for: spatial coherence, plausible
+proportions for each cell type (see the composition table in Part 1),
+sensible condition-related differences (some cell type proportions are
+expected to shift Healthy vs. Post-Treatment), and ideally no remaining
+"Unknown" labels.
+
+Note: the code chunk above requires `annotations/cluster_level_comparison.csv`
+to already contain a manually completed `consensus_annotation` column (Step
+2), so this chunk cannot run unattended in a fully automated pipeline -
+it's included here as `eval = TRUE` on the assumption the manual review has
+been done between Parts of this walkthrough. Set `eval = FALSE` above if
+running the whole document non-interactively before that review step.
+
+## Saving annotated data
+
+```{r step20_save_final}
+
+#-----------------------------------------------
+# STEP 20: Save final annotated Seurat object
+#-----------------------------------------------
+
+# Save the complete annotated Seurat object
+saveRDS(merged_seurat_integrated,
+        file.path(annot.dir,"annotations","integrated_annotated_seurat.rds"))
+
+# Create metadata export
+metadata_export <- merged_seurat_integrated@meta.data %>%
+  select(
+    sample_id, condition, patient_id,
+    seurat_clusters,
+    manual_annotation,
+    singler_annotation,
+    sctype_annotation,
+    sccatch_annotation,
+    final_annotation
+  )
+
+write.csv(metadata_export,
+          file.path(annot.dir,"annotations/cell_metadata_final.csv"),
+          row.names = TRUE)
+```
+
+This produces `integrated_annotated_seurat.rds` (the complete Seurat object
+carrying every annotation column, ready for downstream analysis such as
+differential expression by cell type and condition) and
+`cell_metadata_final.csv` (a lightweight table suitable for sharing or
+depositing alongside a publication). The comparison files saved earlier in
+this document (`all_methods_comparison.csv`, `cluster_level_comparison.csv`,
+the confusion matrices, and the scType/scCATCH marker evidence files from
+Part 1) together document the reasoning behind the final consensus calls.
+
+## Best practices for cell type annotation
+
+**General principles**
+
+1. *Multiple lines of evidence* - never rely on a single marker or method;
+   combine automated methods with manual validation, and use both positive
+   and negative markers.
+2. *Biological context* - account for tissue type, species differences, and
+   disease-state effects on marker expression.
+3. *Appropriate resolution* - start broad and refine to subtypes only when
+   confident; don't over-split without supporting evidence.
+4. *Conservative when uncertain* - label ambiguous cells "Unknown" rather
+   than guess, and merge unclear distinctions. A broader-but-correct call
+   beats a fine-grained-but-wrong one.
+
+**Method selection guidelines**
+
+- **Manual annotation** when domain expertise is available, the tissue or
+  condition is novel (no good reference exists), the dataset is small
+  (<5,000 cells), or the analysis requires deep biological understanding.
+- **Reference-based (SingleR)** when working with a standard, well-atlased
+  tissue, a large dataset (>50,000 cells), or when fast/scalable annotation
+  is needed and a reference matches the tissue and technology.
+- **Marker-based (scType/scCATCH)** for well-characterized tissues without
+  an appropriate reference, or when transparent/interpretable assignments
+  (seeing exactly which markers drove a call) matter.
+- **Multiple methods** whenever publication-quality annotation is needed,
+  important biological conclusions depend on the cell type calls, the
+  dataset is challenging (mixed states or transitions), or the time budget
+  allows thorough validation.
+
+**Reference selection for SingleR**
+
+- PBMCs: best = `MonacoImmuneData`; alternative = `DatabaseImmuneCellExpression`;
+  avoid `HumanPrimaryCellAtlasData` (too broad, includes irrelevant
+  non-immune types).
+- Other tissues: brain -> `HumanPrimaryCellAtlasData` (good neural coverage);
+  mixed tissues -> `BlueprintEncodeData`; developmental studies ->
+  `NovershternHematopoieticData`.
+- Always verify tissue match, technology match (RNA-seq vs. microarray),
+  and that expected cell types are actually included in the reference -
+  and test more than one reference, as done in Part 1.
+
+**Common pitfalls to avoid**
+
+1. *Over-reliance on automated methods* - algorithms can be confidently
+   wrong (e.g. SingleR calling stressed cells "activated"); always validate
+   with marker expression.
+2. *Wrong reference dataset* - e.g. using a brain reference for blood data;
+   match reference tissue and technology to your sample.
+3. *Ignoring biological context* - markers can differ between disease and
+   health, and between activation/stress states.
+4. *Over-splitting cell types* - e.g. 20+ clusters for a tissue with 8-12
+   expected populations; merge clusters that share markers and function.
+5. *Trusting single markers* - single genes are rarely specific enough;
+   require marker combinations.
+6. *Not validating rare cell types* - artifacts and doublets can masquerade
+   as rare populations; give <1% clusters extra scrutiny.
+7. *Automated consensus without manual review* - naming differences between
+   methods prevent reliable automated comparison; always reconcile by hand
+   as done in this Part.
+
+**Troubleshooting common issues**
+
+- *All markers have extremely high or low values*: usually caused by using
+  raw UMI counts instead of normalized/scaled values - this walkthrough
+  avoids the issue by working from the SCT assay's `data`/`scale.data`
+  layers throughout Part 1.
+- *Methods strongly disagree*: return to marker validation, check for
+  batch effects or low-quality clusters, consider broader/more conservative
+  categories, and try alternative references or marker lists.
+- *Automated methods label everything "Unknown"*: check for a
+  reference/tissue mismatch, incomplete marker databases, QC that was too
+  lenient, or genuinely novel cell types absent from any database.
+- *Too many cell types assigned*: usually over-splitting from batch effects,
+  an overly granular reference, clustering resolution set too high, or
+  doublets creating artificial hybrid types.
+- *Expected cell types missing*: check whether QC filtering was too strict,
+  whether a rare population got merged into a more abundant one, or whether
+  clustering resolution needs to be increased for rare types.
+
+## Conclusion: from clusters to cell types
+
+Four complementary approaches were used to move from numbered clusters to
+labeled cell types: manual annotation (biological expertise), SingleR
+(reference-based, multiple atlases tested), scType (marker-based gene set
+scoring), and scCATCH (tissue-specific automated identification).
+
+**Key takeaways**
+
+1. Agreement across diverse methods (reference-based, marker-based, and
+   manual) builds confidence; disagreement flags ambiguous populations that
+   need further investigation.
+2. Manual validation remains essential - even the best automated methods
+   can be wrong, so always cross-check with marker expression and
+   biological common sense.
+3. Context matters - the same gene can mean different things in different
+   tissues, species, or disease states, so choose references and marker
+   sets that match the specific context of the data.
+4. When uncertain, prefer conservative, broader categories over guessing at
+   fine subtypes - subtypes can always be refined later with more evidence.
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut4_annotation_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"tut4_annotation_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

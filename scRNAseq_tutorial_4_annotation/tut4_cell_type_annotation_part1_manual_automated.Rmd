@@ -1,0 +1,976 @@
+---
+title: "ngs101_scRNAseq_walkthrough_4 - Part 1. Manual and automated cell type annotation"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-4-cell-type-identification/>
+
+Walkthrough 3 produced an integrated, batch-corrected, and clustered Seurat
+object. Clustering only groups transcriptionally similar cells together -
+it says nothing about *what those cells are*. This walkthrough converts
+"Cluster 0, 1, 2 ..." into biologically meaningful labels such as "CD4+ T
+cells" or "Classical Monocytes."
+
+There is no single correct way to do this, so the original tutorial (and
+this walkthrough) uses **four complementary approaches** and then manually
+reconciles the results into a consensus:
+
+1. **Manual annotation** - canonical marker genes plus data-driven marker
+   discovery (`FindAllMarkers`). Time-consuming but the closest thing to a
+   gold standard, because it incorporates biological reasoning that no
+   algorithm currently replicates.
+2. **SingleR** - reference-based annotation. Correlates each cell's
+   expression profile against a curated, pre-labeled reference atlas
+   (`celldex`) and transfers the best-matching label.
+3. **scType** - marker-based gene set scoring. Uses a curated database of
+   positive/negative marker genes per cell type and scores each cluster's
+   enrichment.
+4. **scCATCH** - tissue-specific automated annotation. Automatically finds
+   cluster marker genes and matches them against a tissue-specific reference
+   database (`cellmatch`).
+
+Different methods fail in different ways, so agreement across methods builds
+confidence, and disagreement flags clusters that need closer inspection.
+This first part of the walkthrough runs all four methods; Part 2 compares
+them, builds a manual consensus, and saves the final annotated object.
+
+**Dataset reminder**: GSE174609 is a periodontitis study (8 samples: 4
+Healthy + 4 Post-Treatment PBMC samples). Peripheral blood is an ideal
+dataset for learning annotation because it has well-characterized cell
+types, clear canonical markers, and mature reference atlases.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Automated annotation methods
+library(SingleR)
+library(celldex)
+library(scCATCH)
+
+# Data structures
+library(SingleCellExperiment)
+
+# Marker processing (scType dependency)
+library(HGNChelper)
+library(openxlsx)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(scales)
+library(viridis)
+
+# Set working directory
+base.dir <- "~/GSE174609_scRNA"
+integr.dir <- file.path(base.dir, "integration_analysis")
+annot.dir <- file.path(base.dir, "cell_type_annotation")
+
+# Create output directories
+dir.create(file.path(annot.dir,"plots"), showWarnings = FALSE, recursive = TRUE)
+dir.create(file.path(annot.dir,"plots/manual_annotation"), showWarnings = FALSE)
+dir.create(file.path(annot.dir,"plots/automated_annotation"), showWarnings = FALSE)
+dir.create(file.path(annot.dir,"plots/method_comparison"), showWarnings = FALSE)
+dir.create(file.path(annot.dir,"annotations"), showWarnings = FALSE)
+
+# Set random seed for reproducibility
+set.seed(42)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+```
+
+## Load integrated data from Part 3
+
+```{r step2_load_objs}
+
+#-----------------------------------------------
+# STEP 2: Load integrated data from Part 3
+#-----------------------------------------------
+
+# Object file name from walkthrough 3, Part 3 (already batch-corrected,
+# clustered at the chosen resolution, with sample_id/condition/patient_id
+# metadata attached)
+integrated.file <- "seurat_integrated_clustered.rds"
+
+cat("Reading in integrated Seurat object:", integrated.file, "\n")
+merged_seurat_integrated <- readRDS(file.path(integr.dir,"integrated_data",integrated.file))
+
+# Retrieve the integration method and reduction chosen in Part 2 of
+# walkthrough 3 (chosen_method, chosen_reduction)
+load(file.path(integr.dir,"metadata","chosen_methods.RData"))
+
+cat("\nUsing", chosen_method, "integration; UMAP reduction:", chosen_reduction, "\n")
+cat("Cells:", ncol(merged_seurat_integrated), " Genes:", nrow(merged_seurat_integrated), "\n")
+```
+
+### Fallback: auto-detect the UMAP reduction
+
+If `chosen_methods.RData` isn't available for some reason, the original
+tutorial's approach of scanning the object's reductions for a UMAP by name
+is a reasonable fallback. Not evaluated here since `chosen_reduction` was
+loaded above, but kept for reference.
+
+```{r step2b_reduction_fallback, eval = FALSE}
+available_reductions <- names(merged_seurat_integrated@reductions)
+if ("umap.harmony" %in% available_reductions) {
+  chosen_reduction <- "umap.harmony"
+} else if ("umap.cca" %in% available_reductions) {
+  chosen_reduction <- "umap.cca"
+} else if ("umap.rpca" %in% available_reductions) {
+  chosen_reduction <- "umap.rpca"
+} else if ("umap.mnn" %in% available_reductions) {
+  chosen_reduction <- "umap.mnn"
+} else {
+  chosen_reduction <- "umap"
+}
+```
+
+## Visualize starting point
+
+```{r step3_starting_clusters, fig.width = 14, fig.height = 10}
+
+#-----------------------------------------------
+# STEP 3: Visualize clusters before annotation
+#-----------------------------------------------
+
+p1 <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+              group.by = "seurat_clusters", label = TRUE, label.size = 5,
+              pt.size = 0.1) +
+  ggtitle("Clusters (Pre-Annotation)") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+p2 <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+              group.by = "sample_id", pt.size = 0.1) +
+  ggtitle("Samples") +
+  theme(legend.text = element_text(size = 7))
+
+p3 <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+              group.by = "condition", pt.size = 0.1) +
+  ggtitle("Condition") +
+  scale_color_manual(values = c("Healthy" = "#2E86AB",
+                                 "Post_Treatment" = "#F18F01"))
+
+(p_overview <- (p1 | p2) / (p3 | plot_spacer()))
+
+ggsave(file.path(annot.dir,"plots/00_starting_clusters.png"), p_overview,
+       width = 14, height = 10, dpi = 300)
+```
+
+Top-left shows the numbered clusters we're about to name. Top-right checks
+that samples are still well-mixed within clusters (a sanity check on the
+Part 3 integration). Bottom-left shows how the two conditions distribute
+across clusters - useful context once cell types are assigned.
+
+## Preparing SCT-normalized data for annotation
+
+**Deviation from the original tutorial**: the source article calls
+`NormalizeData()` and `ScaleData()` directly on the integrated object,
+which assumes the standard `RNA` assay workflow. This walkthrough series
+has used `SCTransform` throughout (see walkthrough 3, Part 1), so
+`merged_seurat_integrated` already carries normalized (`data`) and scaled
+(`scale.data`) values in its `SCT` assay - re-running `NormalizeData` /
+`ScaleData` is unnecessary and would not target the right assay.
+
+```{r step4_assay_check}
+DefaultAssay(merged_seurat_integrated) <- "SCT"
+cat("Default assay:", DefaultAssay(merged_seurat_integrated), "\n")
+cat("Assays present:", paste(Assays(merged_seurat_integrated), collapse = ", "), "\n")
+```
+
+### A caveat: `return.only.var.genes` and missing canonical markers
+
+Walkthrough 3's `SCTransform` call used `return.only.var.genes = TRUE`
+(the default), which means only genes selected as highly variable have
+corrected values in the `data` and `scale.data` layers of the `SCT` assay.
+Canonical marker genes used for manual annotation are not guaranteed to be
+highly variable (e.g. broadly-expressed lineage markers can have low
+cell-to-cell variance), so some may be missing from these layers and would
+silently fail to plot with `VlnPlot`/`FeaturePlot`/`DotPlot`/`DoHeatmap`.
+
+`Seurat::GetResidual()` computes corrected values for specific genes on
+demand, regardless of whether they were originally flagged as variable.
+Run this before checking marker presence below.
+
+```{r step4b_get_residual}
+canonical_markers_flat <- c(
+  "CD3D", "CD3E", "CD3G", "CD4", "IL7R", "CD8A", "CD8B",
+  "CD79A", "MS4A1", "CD19", "NKG7", "GNLY", "NCAM1",
+  "CD14", "LYZ", "S100A8", "S100A9", "FCGR3A", "MS4A7",
+  "FCER1A", "CST3", "IL3RA", "GZMB", "SERPINF1",
+  "PPBP", "PF4", "GP9"
+)
+
+markers_present_in_object <- canonical_markers_flat[canonical_markers_flat %in% rownames(merged_seurat_integrated)]
+markers_missing_from_data <- setdiff(
+  markers_present_in_object,
+  rownames(LayerData(merged_seurat_integrated, assay = "SCT", layer = "scale.data"))
+)
+
+if (length(markers_missing_from_data) > 0) {
+  cat("Computing SCT residuals for", length(markers_missing_from_data),
+      "canonical marker(s) not in the variable feature set:\n")
+  cat(" ", paste(markers_missing_from_data, collapse = ", "), "\n")
+  merged_seurat_integrated <- GetResidual(merged_seurat_integrated,
+                                          features = markers_missing_from_data,
+                                          verbose = FALSE)
+} else {
+  cat("All canonical markers already present in SCT scale.data\n")
+}
+```
+
+## Manual cell type annotation: the gold standard
+
+### Understanding PBMC cell types
+
+Approximate expected composition of a healthy human PBMC sample (varies
+with disease, age, and technical factors):
+
+| Cell Type | Expected % | Key Markers | Function |
+|---|---|---|---|
+| T cells | 50-70% | CD3D, CD3E, CD3G | Adaptive immunity |
+| &nbsp;&nbsp;CD4+ T cells | 30-40% | CD3+, CD4+, IL7R | Helper T cells |
+| &nbsp;&nbsp;CD8+ T cells | 20-30% | CD3+, CD8A, CD8B | Cytotoxic T cells |
+| B cells | 10-15% | CD79A, MS4A1 (CD20), CD19 | Antibody production |
+| NK cells | 5-10% | NKG7, GNLY, NCAM1 (CD56) | Innate cytotoxicity |
+| Monocytes | 10-20% | CD14, LYZ, S100A8, S100A9 | Phagocytosis |
+| &nbsp;&nbsp;Classical | ~80% of mono | CD14+, FCGR3A- (CD16-) | CD14+ monocytes |
+| &nbsp;&nbsp;Non-classical | ~20% of mono | CD14low, FCGR3A+ (CD16+) | CD16+ monocytes |
+| Dendritic cells | 1-2% | FCER1A, CST3 | Antigen presentation |
+| Plasmacytoid DC | <1% | IL3RA, GZMB, SERPINF1 | Type I interferon |
+| Platelets | Variable | PPBP, PF4, GP9 | Usually contamination |
+
+### Step 1: canonical marker genes
+
+```{r step5_canonical_markers}
+
+#-----------------------------------------------
+# STEP 5: Define and check canonical markers
+#-----------------------------------------------
+
+# Define comprehensive marker panel for PBMC cell types
+canonical_markers <- list(
+  "T_cells" = c("CD3D", "CD3E", "CD3G"),
+  "CD4_T" = c("CD3D", "CD4", "IL7R"),
+  "CD8_T" = c("CD3D", "CD8A", "CD8B"),
+  "B_cells" = c("CD79A", "MS4A1", "CD19"),
+  "NK_cells" = c("NKG7", "GNLY", "NCAM1"),
+  "Monocytes" = c("CD14", "LYZ", "S100A8", "S100A9"),
+  "Classical_Mono" = c("CD14", "S100A8", "FCGR3A"),
+  "Non_Classical_Mono" = c("FCGR3A", "MS4A7"),
+  "Dendritic_cells" = c("FCER1A", "CST3"),
+  "Plasmacytoid_DC" = c("IL3RA", "GZMB", "SERPINF1"),
+  "Platelets" = c("PPBP", "PF4", "GP9")
+)
+
+# Check which markers are present in dataset
+all_genes <- rownames(merged_seurat_integrated)
+
+for (cell_type in names(canonical_markers)) {
+  markers <- canonical_markers[[cell_type]]
+  present <- markers %in% all_genes
+
+  cat(sprintf("%-20s: %d/%d markers present\n",
+              cell_type, sum(present), length(markers)))
+
+  if (!all(present)) {
+    missing <- markers[!present]
+    cat(sprintf("  Missing: %s\n", paste(missing, collapse = ", ")))
+  }
+}
+```
+
+If a gene is entirely absent from `all_genes` (rather than just absent from
+`scale.data`), it was filtered out upstream during QC gene filtering
+(walkthrough 2) - `GetResidual()` above cannot help there, and that cell
+type will need to rely more heavily on its remaining markers or on the
+automated methods below.
+
+### Step 2: visualizing canonical markers
+
+```{r step6_visualize_markers}
+
+#-----------------------------------------------
+# STEP 6: Visualize canonical markers
+#-----------------------------------------------
+
+# Function to create violin plots for a marker set
+plot_violin_markers <- function(markers, cell_type_name, filename_suffix) {
+  present_markers <- markers[markers %in% rownames(merged_seurat_integrated)]
+
+  if (length(present_markers) == 0) {
+    cat("  No markers present for", cell_type_name, "\n")
+    return(NULL)
+  }
+
+  cat(" ", cell_type_name, ":", length(present_markers), "markers\n")
+
+  p <- VlnPlot(merged_seurat_integrated,
+               features = present_markers,
+               group.by = "seurat_clusters",
+               pt.size = 0,
+               ncol = 3) &
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 0, hjust = 0.5, size = 8),
+          axis.title.x = element_blank(),
+          plot.title = element_text(size = 11, face = "bold"))
+
+  n_rows <- ceiling(length(present_markers) / 3)
+  height <- max(4, n_rows * 2.5)
+
+  ggsave(file.path(annot.dir,paste0("plots/manual_annotation/violin_", filename_suffix, ".png")),
+         p, width = 14, height = height, dpi = 300)
+
+  return(p)
+}
+
+# Function to create UMAP feature plots for a marker set
+plot_umap_markers <- function(markers, cell_type_name, filename_suffix) {
+  present_markers <- markers[markers %in% rownames(merged_seurat_integrated)]
+
+  if (length(present_markers) == 0) {
+    return(NULL)
+  }
+
+  p <- FeaturePlot(merged_seurat_integrated,
+                   features = present_markers,
+                   reduction = chosen_reduction,
+                   ncol = 4,
+                   pt.size = 0.1) &
+    theme(plot.title = element_text(size = 10),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          legend.position = "right")
+
+  n_rows <- ceiling(length(present_markers) / 4)
+  height <- max(4, n_rows * 3)
+
+  ggsave(file.path(annot.dir,paste0("plots/manual_annotation/umap_", filename_suffix, ".png")),
+         p, width = 16, height = height, dpi = 300)
+
+  return(p)
+}
+
+# Generate plots for ALL cell types
+for (cell_type_key in names(canonical_markers)) {
+  markers <- canonical_markers[[cell_type_key]]
+  cell_type_name <- gsub("_", " ", cell_type_key)
+
+  plot_violin_markers(markers, cell_type_name, cell_type_key)
+  plot_umap_markers(markers, cell_type_name, cell_type_key)
+}
+
+# Create comprehensive DotPlot showing all key markers
+all_markers <- unique(unlist(canonical_markers))
+all_markers_present <- all_markers[all_markers %in% rownames(merged_seurat_integrated)]
+
+p_dotplot <- DotPlot(merged_seurat_integrated,
+                     features = all_markers_present,
+                     group.by = "seurat_clusters") +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        axis.text.y = element_text(size = 8)) +
+  labs(title = "All Canonical Markers by Cluster",
+       subtitle = paste(length(all_markers_present), "markers across all PBMC cell types"))
+
+ggsave(file.path(annot.dir,"plots/manual_annotation/dotplot_all_canonical_markers.png"), p_dotplot,
+       width = 12, height = max(8, length(all_markers_present) * 0.15), dpi = 300)
+
+p_dotplot
+```
+
+Reading the violin plots: a wide/tall violin with values well above 1-2
+indicates high, consistent expression in that cluster; a thin violin
+hugging zero indicates the gene is essentially absent. A marker is
+cluster-specific when only one or a few clusters show clear elevation.
+
+Reading the DotPlot: dot size encodes the percentage of cells in a cluster
+expressing the gene; dot color encodes average expression level. Look for
+*combinations* of markers that uniquely define a cluster - single genes are
+rarely sufficient (e.g. `CD4` alone doesn't separate CD4+ T cells from some
+myeloid populations).
+
+### Step 3: data-driven marker discovery
+
+`FindAllMarkers` performs differential expression of each cluster against
+all remaining cells, which is a useful complement to (not a replacement
+for) canonical markers - it can reveal markers you didn't think to check.
+
+Because `merged_seurat_integrated` was created by running `SCTransform`
+across multiple sample layers (walkthrough 3, Part 1), the `SCT` assay
+holds separate correction models per sample. `PrepSCTFindMarkers()`
+re-corrects counts to a common sequencing depth so that differential
+expression p-values and fold-changes are comparable across samples - this
+step is required before `FindAllMarkers` on an `SCT` assay and is *not*
+part of the standard-`NormalizeData` workflow the original tutorial
+assumes.
+
+```{r step7_find_markers}
+
+#-----------------------------------------------
+# STEP 7: Find cluster-specific marker genes
+#-----------------------------------------------
+
+# Recorrect SCT counts to a common sequencing depth across samples before DE
+merged_seurat_integrated <- PrepSCTFindMarkers(merged_seurat_integrated, verbose = FALSE)
+
+# Find markers for each cluster vs all other cells
+cluster_markers <- FindAllMarkers(
+  merged_seurat_integrated,
+  assay = "SCT",
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  verbose = FALSE
+)
+
+# Remove ribosomal and mitochondrial genes - these commonly top DE lists
+# but reflect cell quality/metabolic state rather than cell identity
+cluster_markers_filtered <- cluster_markers %>%
+  filter(!grepl("^RP[SL]", gene)) %>%
+  filter(!grepl("^MT-", gene))
+
+# Get top 5 markers per cluster
+top_markers <- cluster_markers_filtered %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC) %>%
+  arrange(cluster, desc(avg_log2FC))
+
+cat("\nTop 5 markers per cluster:\n")
+print(top_markers %>% select(cluster, gene, avg_log2FC, pct.1, pct.2))
+
+# Save all markers
+write.csv(cluster_markers_filtered,
+          file.path(annot.dir,"annotations/cluster_markers_all.csv"),
+          row.names = FALSE)
+
+write.csv(top_markers,
+          file.path(annot.dir,"annotations/top5_markers_per_cluster.csv"),
+          row.names = FALSE)
+
+# Create heatmap of top markers
+top_genes <- top_markers$gene
+
+p_heatmap <- DoHeatmap(
+  merged_seurat_integrated,
+  features = top_genes,
+  group.by = "seurat_clusters",
+  size = 3
+) +
+  theme(axis.text.y = element_text(size = 6)) +
+  labs(title = "Top 5 Markers per Cluster")
+
+ggsave(file.path(annot.dir,"plots/manual_annotation/06_heatmap_top_markers.png"), p_heatmap,
+       width = 12, height = 14, dpi = 300)
+
+p_heatmap
+```
+
+Interpreting the `FindAllMarkers` output: `avg_log2FC` is higher when a gene
+is more specific to that cluster; `pct.1` is the percentage of cells *in*
+the cluster expressing the gene; `pct.2` is the percentage of cells *outside*
+the cluster expressing it. A good marker has high `pct.1`, low `pct.2`, and
+a large positive `avg_log2FC`. `min.pct = 0.25` requires the gene be
+detected in at least 25% of cells in the cluster before being tested at all.
+
+### Step 4: manual cluster assignment
+
+The mapping below is an **example** built from the violin plots, DotPlot,
+and `FindAllMarkers` results above, following this process: examine marker
+expression per cluster -> cross-check against `FindAllMarkers` -> find the
+combination of markers that most uniquely identifies each cluster ->
+merge clusters that share the same identifying combination. **Customize
+this mapping for your own cluster numbers and marker patterns** - it will
+not transfer directly to a different clustering resolution or dataset.
+
+```{r step8_manual_assignment}
+
+#-----------------------------------------------
+# STEP 8: Manual cell type assignment
+#-----------------------------------------------
+
+# EXAMPLE MAPPING - CUSTOMIZE FOR YOUR DATA
+cluster_to_celltype <- c(
+  "0" = "CD4+ T cells",
+  "1" = "CD4+ T cells",
+  "2" = "NK cells",
+  "3" = "NK cells",
+  "4" = "CD4+ T cells",
+  "5" = "NK cells",
+  "6" = "Classical Mono",
+  "7" = "B Cells",
+  "8" = "CD8+ T Cells",
+  "9" = "B Cells",
+  "10" = "CD4+ T cells",
+  "11" = "CD4+ T cells",
+  "12" = "Monocytes",
+  "13" = "CD4+ T cells",
+  "14" = "NK cells",
+  "15" = "NK cells",
+  "16" = "Platelets"
+)
+
+# Apply to all cells
+cluster_ids <- as.character(merged_seurat_integrated$seurat_clusters)
+merged_seurat_integrated$manual_annotation <- unname(cluster_to_celltype[cluster_ids])
+
+# Visualize manual annotation
+p_manual <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "manual_annotation",
+  label = TRUE,
+  label.size = 4,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("Manual Cell Type Annotation") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+ggsave(file.path(annot.dir,"plots/manual_annotation/07_manual_annotation_umap.png"), p_manual,
+       width = 10, height = 8, dpi = 300)
+
+# Split by condition
+p_manual_split <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "manual_annotation",
+  split.by = "condition",
+  pt.size = 0.1,
+  ncol = 2
+) +
+  ggtitle("Manual Annotation by Condition")
+
+ggsave(file.path(annot.dir,"plots/manual_annotation/08_manual_annotation_by_condition.png"),
+       p_manual_split, width = 14, height = 6, dpi = 300)
+
+p_manual
+```
+
+A simple decision framework for cross-checking assignments, using a
+handful of markers per row:
+
+| Cluster | CD3D | CD4 | CD8A | CD14 | CD79A | NKG7 | Assignment |
+|---|---|---|---|---|---|---|---|
+| 0 | High | High | Low | Low | Low | Low | CD4+ T cells |
+| 1 | High | Low | High | Low | Low | Low | CD8+ T cells |
+| 2 | Low | Low | Low | Low | High | Low | B cells |
+| 3 | Low | Low | Low | High | Low | Low | Monocytes |
+| 4 | Low | Low | Low | Low | Low | High | NK cells |
+
+## SingleR: reference-based annotation
+
+### Understanding SingleR's algorithm
+
+For each cell, SingleR calculates its correlation with every cell type in a
+reference dataset, then fine-tunes by re-scoring using only genes variable
+within the top-scoring types. It reports both a predicted label and a
+confidence ("delta") score - the difference between the best and
+second-best match - which flags ambiguous cells.
+
+### Available reference datasets (`celldex`)
+
+| Reference | Cell Types | Source | Best For |
+|---|---|---|---|
+| HumanPrimaryCellAtlas | 38 types | Microarray | Broad tissue coverage |
+| MonacoImmuneData | 29 immune types | RNA-seq | Immune cells (PBMCs) |
+| DatabaseImmuneCellExpression | 15 immune types | Microarray | Basic immune |
+| BlueprintEncodeData | 43 types | RNA-seq | Mixed tissues |
+| NovershternHematopoieticData | 38 hematopoietic | Microarray | Blood differentiation |
+
+For PBMC data, `MonacoImmuneData` is typically the best fit - it's
+immune-specific and generated with RNA-seq, matching our own technology.
+
+### Testing multiple references
+
+```{r step9_singler}
+
+#-----------------------------------------------
+# STEP 9: SingleR with multiple reference datasets
+#-----------------------------------------------
+
+# Convert Seurat to SingleCellExperiment for SingleR
+sce <- as.SingleCellExperiment(merged_seurat_integrated, assay = "SCT")
+
+# Reference 1: HumanPrimaryCellAtlas (Broad)
+hpca_ref <- celldex::HumanPrimaryCellAtlasData()
+
+singler_hpca <- SingleR(
+  test = sce,
+  ref = hpca_ref,
+  labels = hpca_ref$label.main,
+  assay.type.test = "logcounts"
+)
+
+merged_seurat_integrated$singler_hpca <- singler_hpca$labels
+
+# Reference 2: MonacoImmuneData (Immune-Specific)
+monaco_ref <- celldex::MonacoImmuneData()
+
+singler_monaco <- SingleR(
+  test = sce,
+  ref = monaco_ref,
+  labels = monaco_ref$label.main,
+  assay.type.test = "logcounts"
+)
+
+merged_seurat_integrated$singler_monaco <- singler_monaco$labels
+
+# Reference 3: DatabaseImmuneCellExpression
+dice_ref <- celldex::DatabaseImmuneCellExpressionData()
+
+singler_dice <- SingleR(
+  test = sce,
+  ref = dice_ref,
+  labels = dice_ref$label.main,
+  assay.type.test = "logcounts"
+)
+
+merged_seurat_integrated$singler_dice <- singler_dice$labels
+```
+
+HPCA covers 38 broad cell types but includes many non-immune types that can
+cause misclassification in a pure-PBMC sample. Monaco is immune-specific
+(29 types) and RNA-seq-based, usually the best match here. DICE is simpler
+(15 basic immune categories) - less granular but a good sanity check.
+
+### Comparing references
+
+```{r step10_compare_references, fig.width = 16, fig.height = 12}
+
+#-----------------------------------------------
+# STEP 10: Compare SingleR references
+#-----------------------------------------------
+
+p_hpca <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+                  group.by = "singler_hpca", pt.size = 0.1) +
+  labs(title = "HPCA Reference") +
+  theme(legend.text = element_text(size = 7))
+
+p_monaco <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+                    group.by = "singler_monaco", pt.size = 0.1) +
+  labs(title = "Monaco Reference") +
+  theme(legend.text = element_text(size = 7))
+
+p_dice <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+                  group.by = "singler_dice", pt.size = 0.1) +
+  labs(title = "DICE Reference") +
+  theme(legend.text = element_text(size = 7))
+
+p_manual_ref <- DimPlot(merged_seurat_integrated, reduction = chosen_reduction,
+                        group.by = "manual_annotation", pt.size = 0.1) +
+  labs(title = "Manual") +
+  theme(legend.text = element_text(size = 7))
+
+(p_ref_comparison <- (p_manual_ref | p_hpca) / (p_monaco | p_dice))
+
+ggsave(file.path(annot.dir,"plots/automated_annotation/10_singler_reference_comparison.png"),
+       p_ref_comparison, width = 16, height = 12, dpi = 300)
+```
+
+Evaluate references by: how closely they resemble the manual annotation,
+whether the assigned names make biological sense for blood, granularity
+(too many rare labels suggests over-classification; too few suggests
+under-classification), and spatial coherence on the UMAP (a good reference
+gives compact, contiguous regions rather than scattered "salt-and-pepper"
+assignments).
+
+```{r step10b_choose_reference}
+# For this tutorial, we'll use Monaco as the primary SingleR annotation
+merged_seurat_integrated$singler_annotation <- merged_seurat_integrated$singler_monaco
+
+# Visualize chosen reference
+p_singler_final <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "singler_annotation",
+  label = TRUE,
+  label.size = 3,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("SingleR Annotation (Monaco Reference)") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+ggsave(file.path(annot.dir,"plots/automated_annotation/11_singler_final_annotation.png"),
+       p_singler_final, width = 11, height = 8, dpi = 300)
+
+p_singler_final
+```
+
+## scType: marker-based gene set scoring
+
+scType scores each cluster's enrichment for known positive markers (minus
+depletion of known negative markers) using a curated marker database. It
+is transparent - you can always see exactly which markers drove a call.
+
+### Loading scType functions
+
+The scType project distributes two small R scripts rather than an
+installable package.
+
+```{r step11_sctype_functions}
+
+#-----------------------------------------------
+# STEP 11: Load scType functions
+#-----------------------------------------------
+
+# Load scType functions from GitHub
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+```
+
+### Loading marker database
+
+```{r step12_sctype_db}
+
+#-----------------------------------------------
+# STEP 12: Load scType marker database
+#-----------------------------------------------
+
+# Download the full database
+db_url <- "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx"
+temp_file <- tempfile(fileext = ".xlsx")
+download.file(db_url, destfile = temp_file, mode = "wb")
+
+# Read the database for immune system
+db <- read.xlsx(temp_file)
+db_immune <- db[db$tissueType == "Immune system", ]
+
+# Prepare gene sets
+gs_list <- gene_sets_prepare(temp_file, "Immune system")
+
+cat("Available cell types in database:\n")
+print(names(gs_list$gs_positive))
+```
+
+The database provides, per tissue, both positive markers (should be
+expressed) and negative markers (should *not* be expressed - useful for
+distinguishing similar types). We use the "Immune system" tissue subset,
+which covers common PBMC populations and subtypes.
+
+### Calculating scType scores
+
+```{r step13_sctype_scores}
+
+#-----------------------------------------------
+# STEP 13: Calculate scType scores
+#-----------------------------------------------
+
+# Get scaled data (SCT assay; residuals for any missing canonical markers
+# were already computed above via GetResidual())
+scaled_data <- as.matrix(LayerData(merged_seurat_integrated, assay = "SCT", layer = "scale.data"))
+
+# Calculate scores
+es_max <- sctype_score(
+  scRNAseqData = scaled_data,
+  scaled = TRUE,
+  gs = gs_list$gs_positive,
+  gs2 = gs_list$gs_negative
+)
+
+# Assign cell types to clusters
+clusters <- merged_seurat_integrated$seurat_clusters
+cL_results <- do.call("rbind", lapply(unique(clusters), function(cl) {
+  es_max_cl <- sort(rowSums(es_max[, clusters == cl]), decreasing = TRUE)
+
+  top_score <- es_max_cl[1]
+  top_type <- names(es_max_cl)[1]
+
+  data.frame(
+    cluster = cl,
+    type = top_type,
+    scores = top_score,
+    ncells = sum(clusters == cl)
+  )
+}))
+
+# Filter low-confidence assignments - clusters scoring below the 60th
+# percentile of all cluster scores are relabeled "Unknown" rather than
+# forced into a possibly-wrong category
+score_threshold <- quantile(cL_results$scores, 0.6)
+cL_results$type[cL_results$scores < score_threshold] <- "Unknown"
+
+# Create mapping and apply to cells
+cluster_to_sctype <- setNames(cL_results$type, cL_results$cluster)
+merged_seurat_integrated$sctype_annotation <- unname(cluster_to_sctype[
+  as.character(merged_seurat_integrated$seurat_clusters)
+])
+
+# Visualize
+p_sctype <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "sctype_annotation",
+  label = TRUE,
+  label.size = 4,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("scType: Marker-Based Annotation") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+ggsave(file.path(annot.dir,"plots/automated_annotation/12_sctype_annotation.png"), p_sctype,
+       width = 11, height = 8, dpi = 300)
+
+# Save scType results
+write.csv(cL_results, file.path(annot.dir,"annotations/sctype_cluster_scores.csv"), row.names = FALSE)
+
+p_sctype
+```
+
+A positive score means strong enrichment for that type's positive markers
+(net of negative-marker depletion); a low or negative score means weak or
+absent evidence. "Unknown" clusters may represent cell types absent from
+the scType database, mixed populations that need finer clustering
+resolution, low-quality cells that should have been caught during QC, or
+genuinely transitional/activation states.
+
+## scCATCH: tissue-specific automated annotation
+
+scCATCH ("Single Cell Cluster-based Annotation Toolkit for Cellular
+Heterogeneity") automatically identifies cluster marker genes and matches
+them against a tissue-specific reference database (`cellmatch`), so no
+manual marker curation is required.
+
+### Running scCATCH
+
+```{r step14_sccatch}
+
+#-----------------------------------------------
+# STEP 14: scCATCH annotation
+#-----------------------------------------------
+
+# Prepare data for scCATCH (SCT normalized data layer)
+obj_sccatch <- createscCATCH(
+  data = LayerData(merged_seurat_integrated, assay = "SCT", layer = "data"),
+  cluster = as.character(merged_seurat_integrated$seurat_clusters)
+)
+
+# Find marker genes for each cluster
+obj_sccatch <- findmarkergene(
+  object = obj_sccatch,
+  species = "Human",
+  marker = cellmatch,
+  tissue = "Blood",
+  cancer = "Normal",
+  cell_min_pct = 0.25,
+  logfc = 0.25,
+  pvalue = 0.05
+)
+
+# Find cell types based on markers
+obj_sccatch <- findcelltype(obj_sccatch)
+
+# Extract results
+sccatch_celltype <- obj_sccatch@celltype
+
+# Create cluster to cell type mapping
+cluster_to_sccatch <- setNames(
+  sccatch_celltype$cell_type,
+  sccatch_celltype$cluster
+)
+
+# Apply to all cells
+merged_seurat_integrated$sccatch_annotation <- unname(cluster_to_sccatch[
+  as.character(merged_seurat_integrated$seurat_clusters)
+])
+
+# Handle unmapped clusters
+merged_seurat_integrated$sccatch_annotation[
+  is.na(merged_seurat_integrated$sccatch_annotation)
+] <- "Unknown"
+
+# Visualize
+p_sccatch <- DimPlot(
+  merged_seurat_integrated,
+  reduction = chosen_reduction,
+  group.by = "sccatch_annotation",
+  label = TRUE,
+  label.size = 4,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("scCATCH: Tissue-Specific Database") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+ggsave(file.path(annot.dir,"plots/automated_annotation/13_sccatch_annotation.png"), p_sccatch,
+       width = 11, height = 8, dpi = 300)
+
+# Save detailed results
+write.csv(sccatch_celltype,
+          file.path(annot.dir,"annotations/sccatch_cluster_assignments.csv"),
+          row.names = FALSE)
+
+# Save marker evidence
+marker_evidence <- obj_sccatch@markergene
+write.csv(marker_evidence,
+          file.path(annot.dir,"annotations/sccatch_marker_evidence.csv"),
+          row.names = FALSE)
+
+p_sccatch
+```
+
+Parameters: `tissue = "Blood"` selects the appropriate reference subset for
+PBMCs; `cancer = "Normal"` excludes tumor-associated cell types;
+`cell_min_pct = 0.25` and `logfc = 0.25` mirror the `FindAllMarkers`
+thresholds used for manual annotation; `pvalue = 0.05` is the significance
+cutoff for candidate markers. The `sccatch_marker_evidence.csv` file
+records exactly which markers supported each call, which is useful when
+validating or disputing an assignment.
+
+## Save intermediate object
+
+All four annotation methods have now been run and stored as metadata
+columns (`manual_annotation`, `singler_annotation`, `sctype_annotation`,
+`sccatch_annotation`) on `merged_seurat_integrated`. Part 2 of this
+walkthrough compares them and builds a consensus.
+
+```{r save_part1_object}
+saveRDS(merged_seurat_integrated,
+        file.path(annot.dir,"annotations","seurat_annotated_methods.rds"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"tut4_annotation_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"tut4_annotation_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

@@ -17,45 +17,11 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## Description
+## Notebook source
 
-Primary source:
+Primary source for code and text within:
 
 <https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-4-cell-type-identification/>
-
-Walkthrough 3 produced an integrated, batch-corrected, and clustered Seurat
-object. Clustering only groups transcriptionally similar cells together -
-it says nothing about *what those cells are*. This walkthrough converts
-"Cluster 0, 1, 2 ..." into biologically meaningful labels such as "CD4+ T
-cells" or "Classical Monocytes."
-
-There is no single correct way to do this, so the original tutorial (and
-this walkthrough) uses **four complementary approaches** and then manually
-reconciles the results into a consensus:
-
-1. **Manual annotation** - canonical marker genes plus data-driven marker
-   discovery (`FindAllMarkers`). Time-consuming but the closest thing to a
-   gold standard, because it incorporates biological reasoning that no
-   algorithm currently replicates.
-2. **SingleR** - reference-based annotation. Correlates each cell's
-   expression profile against a curated, pre-labeled reference atlas
-   (`celldex`) and transfers the best-matching label.
-3. **scType** - marker-based gene set scoring. Uses a curated database of
-   positive/negative marker genes per cell type and scores each cluster's
-   enrichment.
-4. **scCATCH** - tissue-specific automated annotation. Automatically finds
-   cluster marker genes and matches them against a tissue-specific reference
-   database (`cellmatch`).
-
-Different methods fail in different ways, so agreement across methods builds
-confidence, and disagreement flags clusters that need closer inspection.
-This first part of the walkthrough runs all four methods; Part 2 compares
-them, builds a manual consensus, and saves the final annotated object.
-
-**Dataset reminder**: GSE174609 is a periodontitis study (8 samples: 4
-Healthy + 4 Post-Treatment PBMC samples). Peripheral blood is an ideal
-dataset for learning annotation because it has well-characterized cell
-types, clear canonical markers, and mature reference atlases.
 
 ## Libraries and directories
 
@@ -68,6 +34,11 @@ types, clear canonical markers, and mature reference atlases.
 # Core single-cell analysis
 library(Seurat)
 library(SeuratObject)
+
+# Speeds up FindAllMarkers (Wilcoxon rank-sum test) within Seurat
+library(presto)
+# install.packages('devtools')
+# devtools::install_github('immunogenomics/presto')
 
 # Automated annotation methods
 library(SingleR)
@@ -84,16 +55,17 @@ library(openxlsx)
 # Visualization and data manipulation
 library(ggplot2)
 library(ggrepel)
-library(dplyr)
+library(ggalluvial)
 library(patchwork)
 library(RColorBrewer)
 library(scales)
 library(viridis)
+library(dplyr)
 
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
 integr.dir <- file.path(base.dir, "integration_analysis")
-annot.dir <- file.path(base.dir, "cell_type_annotation")
+annot.dir <- file.path(integr.dir, "cell_type_annotation")
 
 # Create output directories
 dir.create(file.path(annot.dir,"plots"), showWarnings = FALSE, recursive = TRUE)
@@ -107,6 +79,9 @@ set.seed(42)
 
 # Configure plotting defaults
 theme_set(theme_classic(base_size = 12))
+
+# Set globals.maxSize for transferring large in-memory objects (often needed for SCT work that includes PrepSCTFindMarkers and later FindAllMarkers)
+options(future.globals.maxSize = 32 * 1e9)  ## 32 GB
 ```
 
 ## Load integrated data from Part 3
@@ -155,6 +130,42 @@ if ("umap.harmony" %in% available_reductions) {
 }
 ```
 
+## Description
+
+**Dataset reminder**: GSE174609 is a periodontitis study (8 samples: 4
+Healthy + 4 Post-Treatment PBMC samples). Peripheral blood is an ideal
+dataset for learning annotation because it has well-characterized cell
+types, clear canonical markers, and mature reference atlases.
+
+Walkthrough 3 produced an integrated, batch-corrected, and clustered Seurat
+object. Clustering only groups transcriptionally similar cells together -
+it says nothing about *what those cells are*. This walkthrough converts
+"Cluster 0, 1, 2 ..." into biologically meaningful labels such as "CD4+ T
+cells" or "Classical Monocytes."
+
+There is no single correct way to do this, so the original tutorial (and
+this walkthrough) uses **four complementary approaches** and then manually
+reconciles the results into a consensus:
+
+1. **Manual annotation** - canonical marker genes plus data-driven marker
+   discovery (`FindAllMarkers`). Time-consuming but the closest thing to a
+   gold standard, because it incorporates biological reasoning that no
+   algorithm currently replicates.
+2. **SingleR** - reference-based annotation. Correlates each cell's
+   expression profile against a curated, pre-labeled reference atlas
+   (`celldex`) and transfers the best-matching label.
+3. **scType** - marker-based gene set scoring. Uses a curated database of
+   positive/negative marker genes per cell type and scores each cluster's
+   enrichment.
+4. **scCATCH** - tissue-specific automated annotation. Automatically finds
+   cluster marker genes and matches them against a tissue-specific reference
+   database (`cellmatch`).
+
+Different methods fail in different ways, so agreement across methods builds
+confidence, and disagreement flags clusters that need closer inspection.
+This first part of the walkthrough runs all four methods; Part 2 compares
+them, builds a manual consensus, and saves the final annotated object.
+
 ## Visualize starting point
 
 ```{r step3_starting_clusters, fig.width = 14, fig.height = 10}
@@ -201,10 +212,10 @@ has used `SCTransform` throughout (see walkthrough 3, Part 1), so
 (`scale.data`) values in its `SCT` assay - re-running `NormalizeData` /
 `ScaleData` is unnecessary and would not target the right assay.
 
-```{r step4_assay_check}
+```{r step4a_assay_check}
 DefaultAssay(merged_seurat_integrated) <- "SCT"
 cat("Default assay:", DefaultAssay(merged_seurat_integrated), "\n")
-cat("Assays present:", paste(Assays(merged_seurat_integrated), collapse = ", "), "\n")
+cat("Assays present:", names(merged_seurat_integrated@assays), "\n")
 ```
 
 ### A caveat: `return.only.var.genes` and missing canonical markers

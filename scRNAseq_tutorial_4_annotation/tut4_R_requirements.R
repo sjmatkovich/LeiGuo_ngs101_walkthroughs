@@ -16,6 +16,10 @@ options(repos = c(CRAN = "https://cloud.r-project.org"))
 # Core packages (already installed for Parts 1-3)
 # Seurat, SeuratObject, ggplot2, dplyr, patchwork, glmGamPoi
 
+# Speeds up FindAllMarkers (Wilcoxon rank-sum test) within Seurat
+if (!require("presto", quietly = TRUE))
+  pak::pak('immunogenomics/presto')
+
 # Install Bioconductor manager
 if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")

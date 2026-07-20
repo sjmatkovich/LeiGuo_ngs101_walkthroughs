@@ -875,6 +875,8 @@ manual marker curation is required.
 
 ### Running scCATCH
 
+The `findmarkergene` function required approximately 1 hr wall-clock time (Linux PCluster with 4 CPUs, 64 Gb) - 2026-07-20
+
 ```{r step14_sccatch}
 
 #-----------------------------------------------

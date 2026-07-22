@@ -56,7 +56,8 @@ library(viridis)
 
 # Set working directory
 base.dir <- "~/GSE174609_scRNA"
-annot.dir <- file.path(base.dir, "cell_type_annotation")
+integr.dir <- file.path(base.dir, "integration_analysis")
+annot.dir <- file.path(integr.dir, "cell_type_annotation")
 
 dir.create(file.path(annot.dir,"plots/method_comparison"), showWarnings = FALSE, recursive = TRUE)
 dir.create(file.path(annot.dir,"annotations"), showWarnings = FALSE)
@@ -329,17 +330,35 @@ write.csv(annotation_comparison,
           file.path(annot.dir,"annotations/all_methods_comparison.csv"),
           row.names = FALSE)
 
-# Create cluster-level summary (easier to review)
+## Create cluster-level summary (easier to review)
+# The new 'get_top_type' function guards against any of the table() calls returning NAs, which were causing problems with the original cluster_summary function from Lei Guo's tutorial
+get_top_type <- function(x) {
+  tab <- sort(table(x, useNA = "ifany"), decreasing = TRUE)
+  if (length(tab) == 0) return(NA_character_)
+  names(tab)[1]
+}
+
 cluster_summary <- annotation_comparison %>%
   group_by(cluster) %>%
   summarise(
-    n_cells = n(),
-    manual_type = names(sort(table(manual), decreasing = TRUE))[1],
-    singler_type = names(sort(table(singler), decreasing = TRUE))[1],
-    sctype_type = names(sort(table(sctype), decreasing = TRUE))[1],
-    sccatch_type = names(sort(table(sccatch), decreasing = TRUE))[1],
+    n_cells      = n(),
+    manual_type  = get_top_type(manual),
+    singler_type = get_top_type(singler),
+    sctype_type  = get_top_type(sctype),
+    sccatch_type = get_top_type(sccatch),
     .groups = "drop"
   )
+
+# cluster_summary <- annotation_comparison %>%
+#   group_by(cluster) %>%
+#   summarise(
+#     n_cells = n(),
+#     manual_type = names(sort(table(manual), decreasing = TRUE)),
+#     singler_type = names(sort(table(singler), decreasing = TRUE)),
+#     sctype_type = names(sort(table(sctype), decreasing = TRUE)),
+#     sccatch_type = names(sort(table(sccatch), decreasing = TRUE)),
+#     .groups = "drop"
+#   )
 
 write.csv(cluster_summary,
           file.path(annot.dir,"annotations/cluster_level_comparison.csv"),
@@ -382,9 +401,12 @@ outside R:
      during QC, or a genuinely novel population needing literature
      research.
 4. Save the edited spreadsheet back to CSV (overwriting or renaming
-   `cluster_level_comparison.csv`) before continuing to Step 3.
+   `cluster_level_comparison.csv`) before continuing to Step 3,
+   **OR** specify the `consensus_annotation` column in code below (`step19`).
 
 ### Step 3: import consensus and finalize
+
+Here, `consensus_annotation` is based on 22 different clusters arising from the chosen cluster resolution (and SCT assay normalization) in `tut3` .Rmd files and preceding.
 
 ```{r step19_import_consensus}
 
@@ -396,6 +418,30 @@ outside R:
 # (Save your Excel/Google Sheets file as CSV first)
 cluster_consensus <- read.csv(file.path(annot.dir,"annotations/cluster_level_comparison.csv"),
                               stringsAsFactors = FALSE)
+
+# annotation of 22 clusters arising from previous SCT assay work and cluster quality nomination
+cluster_consensus$consensus_annotation <- c("CD4+ T cells",
+                                            "NK cells",
+                                            "CD8+ T cells",
+                                            "CD4+ T cells",
+                                            "CD14+ monocytes",
+                                            "CD4+ T cells",
+                                            "T cells",
+                                            "T cells",
+                                            "Naive B cells",
+                                            "CD8+ T cells",
+                                            "T cells (circulating fetal)",
+                                            "Naive B cells (dendritic)",
+                                            "CD16+ monocytes",
+                                            "CD4+ T cells",
+                                            "Naive B cells",
+                                            "NK cells",
+                                            "CD4+ T cells",
+                                            "CD4+ T cells",
+                                            "NK cells",
+                                            "Dendritic cells",
+                                            "Plasmacytoid dendritic cells",
+                                            "Platelets")
 
 # Create mapping from cluster to consensus annotation
 cluster_to_consensus <- setNames(
@@ -439,6 +485,7 @@ ggsave(file.path(annot.dir,"plots/method_comparison/19_consensus_by_condition.pn
        p_consensus_split, width = 14, height = 6, dpi = 300)
 
 p_consensus
+p_consensus_split
 ```
 
 Before moving on, check the final plots for: spatial coherence, plausible

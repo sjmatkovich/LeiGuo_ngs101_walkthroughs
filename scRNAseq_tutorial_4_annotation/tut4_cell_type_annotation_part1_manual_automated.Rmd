@@ -519,8 +519,9 @@ The mapping below is an **example** built from the violin plots, DotPlot,
 and `FindAllMarkers` results above, following this process: examine marker
 expression per cluster -> cross-check against `FindAllMarkers` -> find the
 combination of markers that most uniquely identifies each cluster ->
-merge clusters that share the same identifying combination. **Customize
-this mapping for your own cluster numbers and marker patterns** - it will
+merge clusters that share the same identifying combination.
+
+**Customize this mapping for your own cluster numbers and marker patterns** - it will
 not transfer directly to a different clustering resolution or dataset.
 
 ```{r step8_manual_assignment}

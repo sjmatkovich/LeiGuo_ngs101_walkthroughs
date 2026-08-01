@@ -6,18 +6,18 @@
 mkdir -p ~/software
 cd ~/software
  
-# Download Cell Ranger (version 10.0.0)
+# Download Cell Ranger (version 10.1.0)
 # Note: Check https://www.10xgenomics.com/support/software/cell-ranger/downloads#download-links for the most current version
-wget -O cellranger-10.0.0.tar.gz "https://cf.10xgenomics.com/releases/cell-exp/cellranger-10.0.0.tar.gz?Expires=1776761307&Key-Pair-Id=APKAI7S6A5RYOXBWRPDA&Signature=DsZy17ey9Ouw2SzU9dJ0vWDCA7ut-QfNHzkhWscK658AEcuog3Kudf6SwaeWmtN7rKwWCQhuNvD7U17b3-IUkmB~U7XTjRgsABF1dMd5TVsReQztqOQZL-2J-q7ZJkFBAzhUB1exUZC-fp6AIBOPYBQq5O6B7qOgCzENOdDs0qgdvgxsReuNnolQoiJYRd6Eo--Yb6NT82VL~T0FfxR7JmMDYeyp6VT45ci~YIlZWWXgf-~m6XFj1qsHSfPoBJFp8kC62oXvfeMDwHbT4sWH~KEe99HCzgkHXw3BzYw3Zji2YqvI-wLpq4VPEtYIi5z79gBM-M9Njje94JUICwRjdw__"
+wget -O cellranger-10.1.0.tar.gz "https://cf.10xgenomics.com/releases/cell-exp/cellranger-10.1.0.tar.gz?Expires=1785649812&Key-Pair-Id=APKAI7S6A5RYOXBWRPDA&Signature=nXfylzAG4hjmB7XhDifAL1qEgLRASFS51-CkLeGzkXV4h6pdgwITUmeQN8Him8vVZUnQW33~jYr87bTsR3~qBEgw5gHXpNAnWyKleT9d0vZXtNH6dfclqhvy7VTaHqYe87fRTXvQItqI5f7mKbzwRXQPGLLlatDkQQ0VQSDs0OT-9qjvvT21YflzZV2vUagjUYW9HwFYw5h0iznKt42V5L9XRKrw8G7eEK8556L46kPZjNY3KPeqHxTGzwiV6OmpQZZFKo08dRWIcL6uQN7SifbiUE4M-~pueOMaQsdxYbQlTV5IrzIhWdLU~eN9D95E~BWMcUwsWy0h5ztc0ZMUkw__"wget -O cellranger-10.0.0.tar.gz "https://cf.10xgenomics.com/releases/cell-exp/cellranger-10.0.0.tar.gz?Expires=1776761307&Key-Pair-Id=APKAI7S6A5RYOXBWRPDA&Signature=DsZy17ey9Ouw2SzU9dJ0vWDCA7ut-QfNHzkhWscK658AEcuog3Kudf6SwaeWmtN7rKwWCQhuNvD7U17b3-IUkmB~U7XTjRgsABF1dMd5TVsReQztqOQZL-2J-q7ZJkFBAzhUB1exUZC-fp6AIBOPYBQq5O6B7qOgCzENOdDs0qgdvgxsReuNnolQoiJYRd6Eo--Yb6NT82VL~T0FfxR7JmMDYeyp6VT45ci~YIlZWWXgf-~m6XFj1qsHSfPoBJFp8kC62oXvfeMDwHbT4sWH~KEe99HCzgkHXw3BzYw3Zji2YqvI-wLpq4VPEtYIi5z79gBM-M9Njje94JUICwRjdw__"
  
 # Extract the tarball
-tar -xzvf cellranger-10.0.0.tar.gz
+tar -xzvf cellranger-10.1.0.tar.gz
  
 # Add Cell Ranger to PATH (optional: add to ~/.bashrc for permanent access)
-export PATH=$HOME/software/cellranger-10.0.0:$PATH
+export PATH=$HOME/software/cellranger-10.1.0:$PATH
  
 # To make this permanent, add to your ~/.bashrc:
-# echo 'export PATH=$HOME/software/cellranger-10.0.0:$PATH' >> ~/.bashrc
+# echo 'export PATH=$HOME/software/cellranger-10.1.0:$PATH' >> ~/.bashrc
 # source ~/.bashrc
  
 # Check Cell Ranger components
@@ -49,8 +49,8 @@ conda install -y \
  
 # Verify installations
 fastqc --version         # FastQC v0.12.1
-multiqc --version        # multiqc, version 1.19
-prefetch --version       # prefetch : 3.0.10
+multiqc --version        # multiqc, version 1.35
+prefetch --version       # prefetch : 3.4.1
 
 #-----------------------------------------------
 # STEP 2: Download Cell Ranger reference genome

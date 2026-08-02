@@ -40,12 +40,12 @@ conda config --add channels conda-forge
 conda config --set channel_priority strict
  
 # Install required tools
-conda install -y \
-    sra-tools \          # For downloading data from SRA
-    fastqc \             # For quality control
-    multiqc \            # For aggregating QC reports
-    wget \               # For downloading files
-    samtools             # For BAM file manipulation
+# -  sra-tools: For downloading data from SRA
+# -  fastqc: For quality control of FASTQ files
+# -  multiqc: For aggregating QC reports
+# -  wget: For downloading files
+# -  samtools: For BAM file manipulation
+conda install -y sra-tools fastqc multiqc wget samtools
  
 # Verify installations
 fastqc --version         # FastQC v0.12.1

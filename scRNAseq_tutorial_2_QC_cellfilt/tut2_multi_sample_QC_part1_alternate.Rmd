@@ -1,8 +1,12 @@
 ---
 title: "ngs101_scRNAseq_walkthrough_2_QC - adapted to multiple samples"
-subtitle: "part 1 - empty droplets, ambient RNA, doublet detection, initial visualization"
+subtitle: "part 1 - doublet detection, initial visualization"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.dir: "~/GSE174609_scRNA/counts_input" # directory with raw coun matrices
+  species: "human" # for QC metrics; options are "human" or "mouse"
 output:
   html_document:
     toc: true
@@ -48,7 +52,8 @@ library(patchwork)           # Combine plots
 library(dplyr)               # Data manipulation
  
 # Set working directory
-base.dir <- "~/GSE174609_scRNA" # contains "cellranger_output" subdirectory with multiple samples within
+base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
+input.dir <- params$input.dir
 qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
 if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
 filt.dir <- file.path(base.dir,"filtered_data")
@@ -115,9 +120,10 @@ for (i in seq_along(sample_names)) {
   # cellranger_output.dir <- file.path(base.dir,
   #                                    paste0("cellranger_output/", sample_names[i], "/outs"))
   # counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
+
   ## Examples
-  count_input.dir <- file.path(base.dir, paste0("counts_input/", sample_names[i]))
-  counts <- Read10X(data.dir = count_input.dir)
+  count_input.dir <- file.path(input.dir, sample_names[i])) 
+  counts <- Read10X(data.dir = count_input.dir) # may need a different function or even read.csv() if just plain count matrix
   seurat_obj <- CreateSeuratObject(
     counts = counts,
     project = sample_names[i],
@@ -236,10 +242,6 @@ This is a three-step procedure:
 - Parameter selection and visualization of impact on individual cells with before & after plots
 - Implement chosen filtering parameters
 
-### Note on filtering in this walkthrough: Human data
-
-The % MT and % ribo filtering steps below are based on **human** gene symbols. For future workflow development, select according to species.
-
 **For snRNAseq work**, consider visualization of MALAT1 as an additional violin plot.
 
 ### Unfiltered cells visualization (loop)
@@ -248,6 +250,11 @@ The % MT and % ribo filtering steps below are based on **human** gene symbols. F
 #-----------------------------------------------
 # STEP 7: Calculate QC metrics, visualize, and filter cells
 #-----------------------------------------------
+nCount_RNA <- vector(mode = "numeric", length = length(sample_names))
+nFeature_RNA <- vector(mode = "numeric", length = length(sample_names))
+percent_mt <- vector(mode = "numeric", length = length(sample_names))
+percent_ribo <- vector(mode = "numeric", length = length(sample_names))
+MALAT1_ratio <- vector(mode = "numeric", length = length(sample_names))
 
 for (j in seq_along(sample_names)) {
   cat("Starting QC part 2 for",sample_names[j],"\n")
@@ -255,11 +262,24 @@ for (j in seq_along(sample_names)) {
                                          paste0(sample_names[j], "_qc_part1_filtered.rds")
                                          )
                         )
+
+if (params$species == "human") {
+  ribo_pattern <- "^RP[SL]"
+  mt_pattern <- "^MT-"
+  malat1_pattern <- "MALAT1"
+} else if (params$species == "mouse") {
+  ribo_pattern <- "^Rp[sl]"
+  mt_pattern <- "^mt-"
+  malat1_pattern <- "Malat1"
+} else {
+  stop("Invalid species parameter. Please use 'human' or 'mouse'.")
+}
 # Calculate QC metrics
-seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
-seurat_obj[["percent.ribo"]] <- PercentageFeatureSet(seurat_obj, pattern = "^RP[SL]")
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = mt_pattern)
+seurat_obj[["percent.ribo"]] <- PercentageFeatureSet(seurat_obj, pattern = ribo_pattern)
 seurat_obj$log10GenesPerUMI <- log10(seurat_obj$nFeature_RNA) / log10(seurat_obj$nCount_RNA)
- 
+seurat_obj[["MALAT1_ratio"]] <- FetchData(seurat_obj, vars = malat1_pattern, layer = "counts") / seurat_obj$nCount_RNA
+
 # Summary statistics to guide threshold setting
 cat("\nQC Metric Distributions for",sample_names[j],"\n")
 cat("nCount_RNA (UMI):\n")
@@ -278,6 +298,9 @@ cat("  Median:", round(median(seurat_obj$percent.mt), 2), "%",
  
 cat("percent.ribo:\n")
 cat("  Median:", round(median(seurat_obj$percent.ribo), 2), "%\n")
+
+cat("MALAT1_ratio:\n")
+cat("  Median:", round(median(seurat_obj$MALAT1_ratio), 2), "%\n")
  
 # Visualize distributions - THE CRITICAL STEP
 (p3 <- VlnPlot(
@@ -311,7 +334,38 @@ cat("Re-saving qc_part1_filtered",sample_names[j],"rds object with additional me
   )))
   rm(seurat_obj)
 }
+```
 
+### Summary of unfiltered cells
+
+All metrics printed above are captured and saved out as a data.frame `cellQC_unfilt_metrics_df` within `r file.path(qc.dir,"qc_metrics",qc_part1.file)`
+
+```{r summary_unfilt}
+
+cellQC_unfilt_metrics_df <- data.frame(
+  sample = sample_names,
+  median_nCount_RNA = nCount_RNA,
+  median_nFeature_RNA = nFeature_RNA,
+  median_percent_mt = percent_mt,
+  median_percent_ribo = percent_ribo,
+  median_MALAT1_ratio = MALAT1_ratio
+)
+
+# Update qc_part1 file
+save(sample_names,
+     empty_lower,
+     empty_niters,
+     ambient_cutoff,
+     initial_droplet_count,
+     initial_gene_count,
+     validated_barcode_count,
+     ambient_fraction,
+     n_doublets,
+     doublet_rate,
+     cells_before_doublet_removal,
+     cellQC_unfilt_metrics_df,
+     file = file.path(qc.dir,"qc_metrics", qc_part1.file)
+)
 cat("\n→ EXAMINE plots/03_qc_violins.png and plots/04_qc_scatter.png\n")
 cat("→ Look for:\n")
 cat("   - Bimodal distributions (good vs bad cells)\n")

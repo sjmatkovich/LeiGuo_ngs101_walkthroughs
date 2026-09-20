@@ -1,0 +1,451 @@
+---
+title: "ngs101_scRNAseq_walkthrough_2_QC - adapted to multiple samples"
+subtitle: "part 1 - empty droplets, ambient RNA, doublet detection, initial visualization"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-2-quality-control-and-cell-filtering>
+
+Expects `cellranger_output` subdirectory with multiple samples within, to permit evaluation of empty droplets, doublet detection and ambient RNA correction.
+
+If these are not available (such as scRNAseq data in the form of processed count matrices from GEO, or split-pool assays such as Scale or Parse that do not use microfludics), then the user should use an alternate .Rmd (_multi_sample_QC_part1_alternate.Rmd) that skips the empty droplet and ambient RNA steps.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)              # Main scRNA-seq toolkit
+library(SeuratObject)        # Seurat object infrastructure
+ 
+# QC-specific packages
+library(DropletUtils)        # Empty droplet detection
+library(scDblFinder)         # Doublet detection
+library(SoupX)               # Ambient RNA correction
+library(SingleCellExperiment) # SCE objects
+ 
+# Visualization
+library(ggplot2)             # Custom plots when needed
+library(patchwork)           # Combine plots
+library(dplyr)               # Data manipulation
+ 
+# Set working directory
+base.dir <- "~/GSE174609_scRNA" # contains "cellranger_output" subdirectory with multiple samples within
+qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
+if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
+filt.dir <- file.path(base.dir,"filtered_data")
+if (!dir.exists(filt.dir)) dir.create(filt.dir, recursive = TRUE)
+
+# Create output directories
+dir.create(file.path(qc.dir,"plots"), showWarnings = FALSE)
+dir.create(file.path(qc.dir,"qc_metrics"), showWarnings = FALSE)
+
+# Set random seed for reproducibility
+set.seed(27)
+```
+
+## Define sample paths and correction parameters
+
+Also define vector objects to receive QC metrics
+
+```{r step2}
+
+# Define paths
+sample_names <- c("Healthy_1",
+                  "Healthy_2",
+                  "Healthy_3",
+                  "Healthy_4",
+                  "Pre_Patient_1",
+                  "Pre_Patient_2",
+                  "Pre_Patient_3",
+                  "Pre_Patient_4",
+                  "Post_Patient_1",
+                  "Post_Patient_2",
+                  "Post_Patient_3",
+                  "Post_Patient_4") # corresponding to cellranger_output/{SAMPLE}/outs
+
+empty_lower <- 100 # 100 UMIs necessary to be counted as non-empty droplet
+empty_niters <- 10000 # iterations for EmptyDrops p-value calculation
+empty_FDR <- 0.01 # FDR threshold for detecting non-empty droplets
+
+ambient_cutoff <- 0.05 # lowpass filter to decide whether to execute SoupX
+
+initial_droplet_count <- vector(mode = "numeric", length = length(sample_names))
+initial_gene_count <- vector(mode = "numeric", length = length(sample_names))
+validated_barcode_count <- vector(mode = "numeric", length = length(sample_names))
+
+ambient_fraction <- vector(mode = "numeric", length = length(sample_names))
+
+n_doublets <- vector(mode = "numeric", length = length(sample_names))
+doublet_rate <- vector(mode = "numeric", length = length(sample_names))
+cells_before_doublet_removal <- vector(mode = "numeric", length = length(sample_names))
+
+p1 <- list() # for collecting empty droplet ggplots
+p2 <- list() # for collecting doublet ggplots
+
+```
+
+## Execute loop for empty droplet, ambient RNA and doublet detection
+
+```{r loop1}
+
+for (i in seq_along(sample_names)) {
+  cat("Starting QC part 1 for",sample_names[i],"\n")
+  cellranger_output.dir <- file.path(base.dir,
+                                     paste0("cellranger_output/", sample_names[i], "/outs"))
+  counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
+  seurat_obj <- CreateSeuratObject(
+    counts = counts,
+    project = sample_names[i],
+    min.cells = 0,
+    min.features = 0
+  )
+  seurat_obj$sample_id <- sample_names[i]
+  
+  ### EmptyDroplet procedures
+  cat("EmptyDrops procedure\n")
+  sce <- as.SingleCellExperiment(seurat_obj)
+  
+  # Track initial droplet count for QC summary
+  initial_droplet_count[i] <- ncol(sce)
+  initial_gene_count[i] <- nrow(sce)
+  
+  # Run EmptyDrops
+  set.seed(27)
+  empty_results <- emptyDrops(
+    m = counts(sce),
+    lower = empty_lower,
+    # Droplets with <100 UMI assumed empty (for estimating ambient RNA)
+    niters = empty_niters,
+    # Iterations for p-value calculation
+    test.ambient = TRUE # Test if droplets differ from ambient RNA profile
+  )
+  
+  # Identify cells (FDR < 0.01)
+  is_cell <- empty_results$FDR < empty_FDR
+  is_cell[is.na(is_cell)] <- FALSE  # Treat NA as empty (very low UMI droplets)
+  validated_barcodes <- colnames(sce)[is_cell]
+  validated_barcode_count[i] <- length(validated_barcodes)
+  
+  # Visual QC - the critical check!
+  empty_df <- data.frame(total_umi = colSums(counts(sce)), is_cell = is_cell)
+  
+  p1[[i]] <- ggplot(empty_df, aes(x = log10(total_umi + 1), fill = is_cell)) +
+    geom_histogram(bins = 50,
+                   alpha = 0.7,
+                   position = "identity") +
+    scale_fill_manual(
+      values = c("TRUE" = "#2E86AB", "FALSE" = "#A23B72"),
+      labels = c("Empty Droplet", "Cell"),
+      name = "Classification"
+    ) +
+    labs(
+      title = "EmptyDrops: Cell vs Empty Droplet Detection",
+      subtitle = paste(
+        sample_names[i],
+        sum(is_cell),
+        "cells called from",
+        ncol(sce),
+        "total droplets"
+      ),
+      x = "log10(UMI + 1)",
+      y = "Number of Droplets"
+    ) +
+    theme_classic() +
+    theme(plot.title = element_text(face = "bold", size = 14))
+  
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[i], "_01_empty_droplets.png")
+    ),
+    p1[[i]],
+    width = 10,
+    height = 6,
+    dpi = 300
+  )
+  
+  # Filter the Seurat object to keep only validated cells
+  # IMPORTANT: Save raw counts BEFORE filtering (needed for SoupX)
+  raw_counts_all_droplets <- LayerData(seurat_obj, layer = "counts")
+  
+  seurat_obj <- subset(seurat_obj, cells = validated_barcodes)
+  rm(sce)
+  
+  ### SoupX procedures
+  cat("SoupX procedure\n")
+  # Prepare SoupX channel
+  # tod (table of droplets) = raw counts from ALL droplets
+  # toc (table of cells) = filtered counts from validated cells only
+  tod <- raw_counts_all_droplets
+  toc <- LayerData(seurat_obj, layer = "counts")
+  sc <- SoupChannel(tod = tod,
+                    toc = toc,
+                    calcSoupProfile = TRUE)
+  
+  # Quick standard Seurat clustering for contamination estimation; clusters needed by SoupX
+  temp_obj <- seurat_obj
+  temp_obj <- NormalizeData(temp_obj, verbose = FALSE)
+  temp_obj <- FindVariableFeatures(temp_obj, nfeatures = 2000, verbose = FALSE)
+  temp_obj <- ScaleData(temp_obj, verbose = FALSE)
+  temp_obj <- RunPCA(temp_obj, npcs = 30, verbose = FALSE)
+  temp_obj <- FindNeighbors(temp_obj, dims = 1:30, verbose = FALSE)
+  temp_obj <- FindClusters(temp_obj, resolution = 0.8, verbose = FALSE)
+  sc <- setClusters(sc, setNames(
+    as.character(temp_obj$seurat_clusters),
+    colnames(temp_obj)
+  ))
+  
+  # Estimate contamination
+  sc <- tryCatch({
+    autoEstCont(sc, verbose = FALSE)
+  }, error = function(e) {
+    sc$fit$rho <- NULL # if autoEstCont fails
+    return(sc)
+  })
+  
+  if (!is.null(sc$fit$rho) && sc$fit_rho != "") {
+    ambient_fraction[i] <- sc$fit$rho
+  } else {
+    ambient_fraction[i] <- NA
+  }
+      
+  # Decision: Skip or correct based on contamination level
+  if (!is.na(ambient_fraction[i]) &&
+      ambient_fraction[i] >= ambient_cutoff) {
+    # Apply correction
+    suppressWarnings({
+      corrected_counts <- adjustCounts(sc)
+    })
+    seurat_obj <- SetAssayData(seurat_obj, layer = "counts", new.data = corrected_counts)
+  }
+  
+  rm(sc, temp_obj, toc, tod, raw_counts_all_droplets)
+  
+  ### Doublet detection procedure (scDblFinder)
+  cat("Doublet detection with scDblFinder\n")
+  sce <- as.SingleCellExperiment(seurat_obj)
+  
+  set.seed(27)
+  # Run scDblFinder (suppress expected warnings about empty layers and xgboost)
+  suppressWarnings({
+    sce <- scDblFinder(sce, dbr = NULL, verbose = FALSE)
+  })
+  
+  # Extract results
+  seurat_obj$doublet_class <- ifelse(sce$scDblFinder.class == "doublet", "Doublet", "Singlet")
+  seurat_obj$doublet_score <- sce$scDblFinder.score
+  
+  # Brief feedback
+  n_doublets[i] <- sum(seurat_obj$doublet_class == "Doublet")
+  doublet_rate[i] <- n_doublets[i] / ncol(seurat_obj) * 100
+  
+  # Track cells before doublet removal for QC summary
+  cells_before_doublet_removal[i] <- ncol(seurat_obj)
+  
+  # Quick UMAP for visualization
+  seurat_obj <- NormalizeData(seurat_obj, verbose = FALSE)
+  seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures = 2000, verbose = FALSE)
+  seurat_obj <- ScaleData(seurat_obj, verbose = FALSE)
+  seurat_obj <- RunPCA(seurat_obj, npcs = 30, verbose = FALSE)
+  suppressWarnings({
+    seurat_obj <- RunUMAP(seurat_obj, dims = 1:30, verbose = FALSE)
+  })
+  
+  # Visualize doublets on UMAP
+  p2[[i]] <- DimPlot(
+    seurat_obj,
+    reduction = "umap",
+    group.by = "doublet_class",
+    cols = c(
+      "Singlet" = "#90E0EF",
+      "Doublet" = "#EF233C"
+    ),
+    pt.size = 1
+  ) +
+    labs(title = paste0("Doublet Detection ",sample_names[i]," (", round(doublet_rate[i], 1), "%)")) +
+    theme(plot.title = element_text(face = "bold", size = 14))
+  
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[i], "_02_doublets_umap.png")
+    ),
+    p2[[i]],
+    width = 8,
+    height = 7,
+    dpi = 300
+  )
+  
+  # Remove doublets
+  seurat_obj <- subset(seurat_obj, subset = doublet_class == "Singlet")
+  
+  cat("Saving qc_part1_filtered",sample_names[i],"rds object\n")
+  saveRDS(seurat_obj,
+          file = file.path(filt.dir, paste0(
+    sample_names[i], "_qc_part1_filtered.rds"
+  )))
+  
+  rm(seurat_obj)
+}
+
+```
+
+### Save out QC metric objects so far
+
+```{r save_QC_part1_metrics}
+
+qc_part1.file <- "qc_part1.RData"
+
+save(
+sample_names,
+empty_lower,
+empty_niters,
+ambient_cutoff,
+initial_droplet_count,
+initial_gene_count,
+validated_barcode_count,
+ambient_fraction,
+n_doublets,
+doublet_rate,
+cells_before_doublet_removal,
+file = file.path(qc.dir,"qc_metrics", qc_part1.file)
+)
+```
+
+## Cell-Level Quality Control: Visualization (unfiltered cells)
+
+Individual cells are filtered based on their quality metrics. The key is visual inspection – look at the distributions and set biologically meaningful thresholds rather than relying on automatic statistical methods.
+
+This is a three-step procedure:
+
+- Visualization of unfiltered cell distributions, including % MT and % ribo genes
+- Parameter selection and visualization of impact on individual cells with before & after plots
+- Implement chosen filtering parameters
+
+### Note on filtering in this walkthrough: Human data
+
+The % MT and % ribo filtering steps below are based on **human** gene symbols. For future workflow development, select according to species.
+
+**For snRNAseq work**, consider visualization of MALAT1 as an additional violin plot.
+
+### Unfiltered cells visualization (loop)
+
+```{r step_7a, fig.width = 15, fig.height = 5, eval = TRUE}
+#-----------------------------------------------
+# STEP 7: Calculate QC metrics, visualize, and filter cells
+#-----------------------------------------------
+
+for (j in seq_along(sample_names)) {
+  cat("Starting QC part 2 for",sample_names[j],"\n")
+  seurat_obj <- readRDS(file = file.path(filt.dir,
+                                         paste0(sample_names[j], "_qc_part1_filtered.rds")
+                                         )
+                        )
+# Calculate QC metrics
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+seurat_obj[["percent.ribo"]] <- PercentageFeatureSet(seurat_obj, pattern = "^RP[SL]")
+seurat_obj$log10GenesPerUMI <- log10(seurat_obj$nFeature_RNA) / log10(seurat_obj$nCount_RNA)
+ 
+# Summary statistics to guide threshold setting
+cat("\nQC Metric Distributions for",sample_names[j],"\n")
+cat("nCount_RNA (UMI):\n")
+cat("  Median:", median(seurat_obj$nCount_RNA), 
+    "| Q1-Q3:", quantile(seurat_obj$nCount_RNA, 0.25), "-", 
+    quantile(seurat_obj$nCount_RNA, 0.75), "\n")
+ 
+cat("nFeature_RNA (genes):\n")
+cat("  Median:", median(seurat_obj$nFeature_RNA),
+    "| Q1-Q3:", quantile(seurat_obj$nFeature_RNA, 0.25), "-",
+    quantile(seurat_obj$nFeature_RNA, 0.75), "\n")
+ 
+cat("percent.mt:\n")
+cat("  Median:", round(median(seurat_obj$percent.mt), 2), "%",
+    "| 95th percentile:", round(quantile(seurat_obj$percent.mt, 0.95), 2), "%\n")
+ 
+cat("percent.ribo:\n")
+cat("  Median:", round(median(seurat_obj$percent.ribo), 2), "%\n")
+ 
+# Visualize distributions - THE CRITICAL STEP
+(p3 <- VlnPlot(
+  seurat_obj,
+  features = c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent.ribo"),
+  ncol = 4,
+  pt.size = 0.1
+) &
+  theme(plot.title = element_text(face = "bold"))
+)
+ 
+ggsave(file.path(qc.dir,paste0("plots/",sample_names[j],"_03_qc_violins.png")), p3, width = 16, height = 4, dpi = 300)
+ 
+# Scatter plots showing metric relationships
+p4 <- FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  labs(title = "UMI vs Genes Detected")
+ 
+p5 <- FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  labs(title = "UMI vs Mitochondrial %")
+ 
+p6 <- FeatureScatter(seurat_obj, feature1 = "percent.mt", feature2 = "percent.ribo") +
+  labs(title = "Mitochondrial % vs Ribosomal %")
+ 
+(p_scatter <- p4 + p5 + p6)
+ggsave(file.path(qc.dir,paste0("plots/",sample_names[j],"_04_qc_scatter.png")), p_scatter, width = 15, height = 5, dpi = 300)
+
+cat("Re-saving qc_part1_filtered",sample_names[j],"rds object with additional metrics\n")
+  saveRDS(seurat_obj,
+          file = file.path(filt.dir, paste0(
+    sample_names[j], "_qc_part1_filtered.rds"
+  )))
+  rm(seurat_obj)
+}
+
+cat("\n→ EXAMINE plots/03_qc_violins.png and plots/04_qc_scatter.png\n")
+cat("→ Look for:\n")
+cat("   - Bimodal distributions (good vs bad cells)\n")
+cat("   - Outliers in scatter plots\n")
+cat("   - Relationship between metrics\n\n")
+
+cat("Guidelines for threshold setting:\n")
+cat("  • nFeature_RNA min: Where does the low-quality tail end? (typically 500-1000)\n")
+cat("  • nFeature_RNA max: Where do potential doublets start? (typically 4000-7000)\n")
+cat("  • percent.mt: PBMCs <10%, Brain <5%, Tumor <20%\n")
+cat("  • If distributions are bimodal, set threshold between modes\n")
+cat("  • Aim to remove no more than 25% of cells \n\n")
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"QC_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```
+
+
+
+

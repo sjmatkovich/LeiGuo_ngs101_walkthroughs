@@ -50,7 +50,27 @@ library(SingleCellExperiment) # SCE objects
 library(ggplot2)             # Custom plots when needed
 library(patchwork)           # Combine plots
 library(dplyr)               # Data manipulation
- 
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_2_QC_cellfilt/tut2_multi_sample_QC_part1_alternate.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
 # Set working directory
 base.dir <- params$base.dir # other analysis subdirectories will be placed here
 input.dir <- params$input.dir # should contain "cellranger_output" subdirectory with multiple samples 

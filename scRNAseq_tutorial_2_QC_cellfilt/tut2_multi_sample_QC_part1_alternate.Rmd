@@ -4,8 +4,8 @@ subtitle: "part 1 - doublet detection, initial visualization"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
-  base.dir: "~/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
-  input.dir: "~/GSE174609_scRNA/counts_input" # directory with raw coun matrices
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.dir: "/mnt/e/linux_share/GSE174609_scRNA/GEO_count_matrices" # directory with raw coun matrices
   species: "human" # for QC metrics; options are "human" or "mouse"
 output:
   html_document:
@@ -28,29 +28,52 @@ Primary source:
 
 <https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-2-quality-control-and-cell-filtering>
 
-Expects `cellranger_output` subdirectory with multiple samples within, to permit evaluation of empty droplets, doublet detection and ambient RNA correction.
+Another .Rmd i this repo for _multi_sample_QC_part1 expects `cellranger_output` subdirectory with multiple samples within, to permit evaluation of empty droplets, doublet detection and ambient RNA correction.
 
-If these are not available (such as scRNAseq data in the form of processed count matrices from GEO, or split-pool assays such as Scale or Parse that do not use microfludics), then the user should use an alternate .Rmd (_multi_sample_QC_part1_alternate.Rmd) that skips the empty droplet and ambient RNA steps.
+If these are not available (such as scRNAseq data in the form of processed count matrices from GEO, or split-pool assays such as Scale or Parse that do not use microfludics), then the user should use this alternate .Rmd (_multi_sample_QC_part1_alternate.Rmd) that skips the empty droplet and ambient RNA steps.
 
 ## Libraries and directories
 
 ```{r step1_libs_data}
+# Fast import
+library(data.table)
+library(tibble)
 
 # Core single-cell analysis
 library(Seurat)              # Main scRNA-seq toolkit
 library(SeuratObject)        # Seurat object infrastructure
  
 # QC-specific packages
-library(DropletUtils)        # Empty droplet detection
+# library(DropletUtils)        # Empty droplet detection
 library(scDblFinder)         # Doublet detection
-library(SoupX)               # Ambient RNA correction
+# library(SoupX)               # Ambient RNA correction
 library(SingleCellExperiment) # SCE objects
  
 # Visualization
 library(ggplot2)             # Custom plots when needed
 library(patchwork)           # Combine plots
 library(dplyr)               # Data manipulation
- 
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_2_QC_cellfilt/tut2_multi_sample_QC_part1_alternate.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
 # Set working directory
 base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
 input.dir <- params$input.dir
@@ -73,7 +96,7 @@ Also define vector objects to receive QC metrics
 
 ```{r step2}
 
-# Define paths
+# Define names and paths; pay attention to the order of the samples in the vector below, as it will be used to index all other vectors
 sample_names <- c("Healthy_1",
                   "Healthy_2",
                   "Healthy_3",
@@ -85,7 +108,9 @@ sample_names <- c("Healthy_1",
                   "Post_Patient_1",
                   "Post_Patient_2",
                   "Post_Patient_3",
-                  "Post_Patient_4") # corresponding to cellranger_output/{SAMPLE}/outs
+                  "Post_Patient_4") # corresponding to cellranger_output/{SAMPLE}/outs or similar
+
+sample_files <- list.files(input.dir, full.names = TRUE, pattern = "*\\.csv\\.gz") # may need to adjust pattern to match count matrix files
 
 ## Variables below not needed in absence of empty droplet and ambient RNA correction steps
 # empty_lower <- 100 # 100 UMIs necessary to be counted as non-empty droplet
@@ -113,7 +138,7 @@ p2 <- list() # for collecting doublet ggplots
 
 In the section below, the `counts` matrix and the directory path for each individual sample will have to be altered for specific projects.
 
-```{r loop1}
+```{r loop1, warning = FALSE}
 
 for (i in seq_along(sample_names)) {
   cat("Starting QC part 1 for",sample_names[i],"\n")
@@ -122,8 +147,11 @@ for (i in seq_along(sample_names)) {
   # counts <- Read10X(data.dir = file.path(cellranger_output.dir, "raw_feature_bc_matrix"))
 
   ## Examples
-  count_input.dir <- file.path(input.dir, sample_names[i])) 
-  counts <- Read10X(data.dir = count_input.dir) # may need a different function or even read.csv() if just plain count matrix
+  # count_input.dir <- file.path(input.dir, sample_names[i])) 
+  # counts <- Read10X(data.dir = count_input.dir) # may need a different function or even read.csv() if just plain count matrix
+  counts <- as_tibble(data.table::fread(sample_files[i])) |> # read in count matrix from CSV file
+      column_to_rownames(var = "gene") |>
+      as.matrix()
   seurat_obj <- CreateSeuratObject(
     counts = counts,
     project = sample_names[i],
@@ -134,9 +162,13 @@ for (i in seq_along(sample_names)) {
   
   ### Doublet detection procedure (scDblFinder)
   cat("Doublet detection with scDblFinder\n")
-  sce <- as.SingleCellExperiment(seurat_obj)
+  # Suppress expected warnings about empty layers
+  sce <- suppressWarnings({
+    as.SingleCellExperiment(seurat_obj)
+  })
+
+  initial_gene_count[i] <- nrow(sce)
   
-  set.seed(27)
   # Run scDblFinder (suppress expected warnings about empty layers and xgboost)
   suppressWarnings({
     sce <- scDblFinder(sce, dbr = NULL, verbose = FALSE)
@@ -212,7 +244,6 @@ empty_lower <- NA
 empty_niters <- NA
 ambient_cutoff <- NA
 initial_droplet_count <- rep(NA, length(sample_names))
-initial_gene_count <- rep(NA, length(sample_names))
 validated_barcode_count <- rep(NA, length(sample_names))
 ambient_fraction <- rep(NA, length(sample_names))
 

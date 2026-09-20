@@ -3956,7 +3956,7 @@
       "NeedsCompilation": "no",
       "Author": "Hadley Wickham [aut, cre], Posit Software, PBC [cph, fnd]",
       "Maintainer": "Hadley Wickham <hadley@posit.co>",
-      "Repository": "https://packagemanager.loxooncology.net/cran/__linux__/jammy/latest"
+      "Repository": "CRAN"
     },
     "dplyr": {
       "Package": "dplyr",

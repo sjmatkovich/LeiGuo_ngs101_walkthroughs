@@ -44,7 +44,7 @@ library(patchwork)           # Combine plots
 library(dplyr)               # Data manipulation
  
 # Set working directory
-base.dir <- "~/GSE174609_scRNA"
+base.dir <- "~/GSE174609_scRNA" # contains "cellranger_output" subdirectory with multiple samples within
 qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
 if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
 filt.dir <- file.path(base.dir,"filtered_data")

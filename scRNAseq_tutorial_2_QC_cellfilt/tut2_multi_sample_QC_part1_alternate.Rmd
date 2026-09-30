@@ -5,7 +5,7 @@ author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
-  input.dir: "/mnt/e/linux_share/GSE174609_scRNA/GEO_count_matrices" # directory with raw coun matrices
+  input.dir: "/mnt/e/linux_share/GSE174609_scRNA/GEO_count_matrices" # directory with raw count matrices
   species: "human" # for QC metrics; options are "human" or "mouse"
 output:
   html_document:
@@ -28,7 +28,7 @@ Primary source:
 
 <https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-2-quality-control-and-cell-filtering>
 
-Another .Rmd i this repo for _multi_sample_QC_part1 expects `cellranger_output` subdirectory with multiple samples within, to permit evaluation of empty droplets, doublet detection and ambient RNA correction.
+Another .Rmd in this repo for _multi_sample_QC_part1 expects `cellranger_output` subdirectory with multiple samples within, to permit evaluation of empty droplets, doublet detection and ambient RNA correction.
 
 If these are not available (such as scRNAseq data in the form of processed count matrices from GEO, or split-pool assays such as Scale or Parse that do not use microfludics), then the user should use this alternate .Rmd (_multi_sample_QC_part1_alternate.Rmd) that skips the empty droplet and ambient RNA steps.
 

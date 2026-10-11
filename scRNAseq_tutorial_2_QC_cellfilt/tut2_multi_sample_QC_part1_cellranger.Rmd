@@ -30,7 +30,7 @@ Primary source:
 
 Expects `cellranger_output` subdirectory with multiple samples within, to permit evaluation of empty droplets, doublet detection and ambient RNA correction.
 
-If these are not available (such as scRNAseq data in the form of processed count matrices from GEO, or split-pool assays such as Scale or Parse that do not use microfludics), then the user should use an alternate .Rmd (_multi_sample_QC_part1_alternate.Rmd) that skips the empty droplet and ambient RNA steps.
+If these are not available (such as scRNAseq data in the form of processed count matrices from GEO, or split-pool assays such as Scale or Parse that do not use microfludics), then the user should use an alternate .Rmd `_multi_sample_QC_part1_alternate.Rmd` that skips the empty droplet and ambient RNA steps.
 
 ## Libraries and directories
 

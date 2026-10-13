@@ -1,12 +1,14 @@
 # Code notebooks to implement tutorials from ngs101 website
 
-Started 2026-05, **last updated** 2026-10-10
+Started 2026-05, **last updated** 2026-10-14
 
 Follow-along coding for tutorials from [Lei Guo's ngs101 website](https://ngs101.com/tutorials/)
 
 While 'ngs101' may seem like a name for a beginner's site, there are also more advanced topics in single-cell and spatial omics work on offer, not to mention workflows beyond tissue or cell omics (such as GWAS).
 
-I have found the workflows suggested by these tutorials to be helpful, and have prepared R markdown notebooks to encapsulate the code presented at the above website and to render parts of it to be more modular, facilitating implementation into a production environment.
+I have found the workflows suggested by these tutorials to be helpful, and have prepared R markdown notebooks to encapsulate the code presented at the above website.
+
+I have rendered parts of the presented code to be more modular, including extracting configurable parameters into YAML frontmatter. This should facilitate later incorporation into a production environment.
 
 ---
 

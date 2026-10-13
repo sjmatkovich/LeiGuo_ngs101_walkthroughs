@@ -113,7 +113,7 @@ sample_names <- c("Healthy_1",
 sample_files <- list.files(input.dir, full.names = TRUE, pattern = "*\\.csv\\.gz") # may need to adjust pattern to match count matrix files
 
 ## Variables below not needed in absence of empty droplet and ambient RNA correction steps
-# empty_lower <- 100 # 100 UMIs necessary to be counted as non-empty droplet
+# empty_lower <- 100 # UMIs necessary to be counted as non-empty droplet
 # empty_niters <- 10000 # iterations for EmptyDrops p-value calculation
 # empty_FDR <- 0.01 # FDR threshold for detecting non-empty droplets
 

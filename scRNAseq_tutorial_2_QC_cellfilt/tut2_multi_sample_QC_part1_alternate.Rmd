@@ -108,7 +108,7 @@ sample_names <- c("Healthy_1",
                   "Post_Patient_1",
                   "Post_Patient_2",
                   "Post_Patient_3",
-                  "Post_Patient_4") # corresponding to cellranger_output/{SAMPLE}/outs or similar
+                  "Post_Patient_4")
 
 sample_files <- list.files(input.dir, full.names = TRUE, pattern = "*\\.csv\\.gz") # may need to adjust pattern to match count matrix files
 

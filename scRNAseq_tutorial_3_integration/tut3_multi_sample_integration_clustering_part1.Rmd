@@ -38,7 +38,7 @@ library(BPCells)
  
 # Integration methods
 library(harmony)
-library(batchelor)
+library(batchelor) # FastMNN
 library(SeuratWrappers)
  
 # Visualization and data manipulation
@@ -90,7 +90,6 @@ integr.dir <- file.path(base.dir, "integration_analysis")
 dir.create(file.path(integr.dir,"plots"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/integration_comparison"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/clustering"), showWarnings = FALSE)
-dir.create(file.path(integr.dir,"integrated_data"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 
 # Set random seed for reproducibility
@@ -250,8 +249,6 @@ cat("Clustering complete:", length(unique(merged_naive$seurat_clusters)), "clust
 saveRDS(merged_naive,file.path(integr.dir,"merged_naive.rds"))
 ```
 
-### CONTINUE EDITING FROM HERE 2026-10-16
-
 ### Visualize basic clusters
 
 ```{r naive_merge_basic_cluster_viz, fig.width = 16, fig.height = 12}
@@ -305,10 +302,7 @@ ggsave(file.path(integr.dir,"plots/01_naive_merge_batch_effects.png"), combined_
 The criterion used in this walkthrough for excessive contribution of a single sample to a cluster is >50% of cluster membership.
 
 ```{r naive_merge_batch_effects}
-#-----------------------------------------------
-# STEP 5: Quantify batch effects with mixing metrics
-#-----------------------------------------------
- 
+
 # Calculate per-cluster sample composition
 cluster_composition <- table(merged_naive$seurat_clusters, merged_naive$sample_id)
 cluster_composition_pct <- prop.table(cluster_composition, margin = 1) * 100
@@ -323,10 +317,13 @@ cat("  Clusters dominated by single sample (>50%):", n_batch_clusters,
 # Clusters dominated by single sample (>50%): 1 / 19
  
 if (n_batch_clusters > 0) {
-  cat("    Naive merge shows significant batch effects\n")
-  cat("  → Integration is necessary\n")
+  cat("    Naive merge shows significant sample-dependent effects\n")
+  cat("  → Integration may be necessary\n")
 }
 ```
+
+### CONTINUE EDITING FROM HERE 2026-10-16
+
 ## Integration procedures
 
 The `merged_naive` Seurat object has had metadata added in prior steps. It's ready for further steps. A copy will be made as `merged_seurat` and the integration procedures wil be run on this new object.

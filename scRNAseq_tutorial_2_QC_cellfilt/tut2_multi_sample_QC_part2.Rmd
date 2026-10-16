@@ -351,7 +351,6 @@ cat("Saving new qc_part2_filtered Seurat object for",sample_names[m],"\n")
   )))
   rm(seurat_obj) 
 }
-
 ```
 
 ### Save out QC metric objects generated after threshold setting

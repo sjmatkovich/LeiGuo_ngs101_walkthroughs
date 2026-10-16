@@ -34,7 +34,7 @@ Primary source:
 library(Seurat)
 library(SeuratObject)
 library(BPCells)
-library(glmGamPoi) # speeds up SCTransform
+# library(glmGamPoi) # speeds up SCTransform
  
 # Integration methods
 library(harmony)
@@ -173,19 +173,12 @@ cat("\nTotal cells across all samples:",
 
 ## Naive merge without integration, with basic cluster determination
 
-Use `SCTransform` here by default rather than the standard Seurat normalization workflow for basic clustering.
+For snRNAseq, consider calculating MALAT1 ratios for each separate sample object in the earlier QC process, and then using MALAT1 ratios as an additional parameter in ScaleData or SCTransform `vars.to.regress`
 
-For snRNAseq, consider calculating MALAT1 ratios for each separate sample object in the earlier QC process, and then using MALAT1 ratios as an additional parameter in SCTransform `vars.to.regress`
-
-The `glmGamPoi` package substantially improves speed and is used by default if installed.
-
-**After the merge**: this is the place to convert the object to on-disk via `BPCells` and thus facilitate further operations. The benefit of on-disk storage is apparent with the standard Seurat normalization workflow, but `SCTransform` requires all data in memory (at least for Seurat 5.4; https://github.com/satijalab/sctransform/issues/207)
+**After the merge**: this is the place to convert the object to on-disk via `BPCells` and thus facilitate further operations. The benefit of on-disk storage is apparent with the standard Seurat normalization workflow, but `SCTransform` would require all data in memory (at least for Seurat 5.4; https://github.com/satijalab/sctransform/issues/207)
 
 ```{r naive_merge}
-#-----------------------------------------------
-# STEP 3: Naive merge without integration
-#-----------------------------------------------
- 
+
 # Merge all samples
 merged_naive <- merge(
   x = seurat_list[[1]],
@@ -195,7 +188,6 @@ merged_naive <- merge(
 )
  
 cat("Merged dataset:", ncol(merged_naive), "cells ×", nrow(merged_naive), "genes\n")
-# Merged dataset: 72649 cells × 18861 genes
 ```
 
 ### Check whether layers are already split
@@ -214,26 +206,39 @@ if (length(current_layers) > 1) {
 
 ### Write layers out with BPCells and normalize
 
-```{r layers_normalization}
+The individual count (integer) layers are exported with `BPCells` for reduced memory demands in future steps.
+
+Normalization and scaling may have been performed previously for individual Seurat objects included in the merge. However, the objects were subset to common genes in a preceding step in this notebook, making it worthwhile to re-do normalization.
+
+```{r layers_bpcells_normalization}
 for (layer in Layers(merged_naive, search = "counts")) {
-  mat <- LayerData(merged_naive, layer = layer)
-  path <- file.path(integr.dir,"bpcells_naive_merge", layer)
+  counts <- LayerData(merged_naive, layer = layer)
+  # Optional sanity check that the values really are non-negative integers
+  stopifnot(all(counts@x == round(counts@x)), min(counts@x) >= 0)
+
+  # converts dgCMatrix to IterableMatrix, then to uint32_t for BPCells. Needed because zero values are stored as doubles in dgCMatrix and trigger BPCells warning of non-intergers
+  mat <- as(counts, "IterableMatrix")
+  mat <- convert_matrix_type(mat, type = "uint32_t")
+  path <- file.path(integr.dir,"bpcells", layer)
   write_matrix_dir(mat, path)
   LayerData(merged_naive, layer = layer) <- open_matrix_dir(path)
 }
 
-## (Standard workflow commands are commented out)
-# merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
-# merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
-# merged_naive <- ScaleData(merged_naive, verbose = FALSE)
+## Standard nfs (Normalize, FindVariableFeatures, Scale) workflow
+merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
+merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
+# There are many parameters worth investigating for ScaleData
+# different model types (linear, negbinom);
+# scale all genes, not just HVG; etc.
+merged_naive <- ScaleData(merged_naive, vars.to.regress = c("percent.mt"), verbose = FALSE)
 
 ## SCTransform
-merged_naive <- SCTransform(merged_naive,
-  vars.to.regress = c("percent.mt"),
-  return.only.var.genes = TRUE,
-  verbose = TRUE,
-  conserve.memory = TRUE
-)
+# merged_naive <- SCTransform(merged_naive,
+#   vars.to.regress = c("percent.mt"),
+#   return.only.var.genes = TRUE,
+#   verbose = TRUE,
+#   conserve.memory = TRUE
+# )
 
 merged_naive <- RunPCA(merged_naive, npcs = 50, verbose = FALSE)
 merged_naive <- RunUMAP(merged_naive, dims = 1:30, reduction = "pca", verbose = FALSE)
@@ -242,17 +247,15 @@ merged_naive <- FindClusters(merged_naive, resolution = 0.6, verbose = FALSE)
  
 cat("Clustering complete:", length(unique(merged_naive$seurat_clusters)), "clusters identified with default parameters\n")
 
-saveRDS(merged_naive,file.path(integr.dir,"integrated_data","merged_naive.rds"))
+saveRDS(merged_naive,file.path(integr.dir,"merged_naive.rds"))
 ```
+
+### CONTINUE EDITING FROM HERE 2026-10-16
 
 ### Visualize basic clusters
 
 ```{r naive_merge_basic_cluster_viz, fig.width = 16, fig.height = 12}
 
-#-----------------------------------------------
-# STEP 4: Visualize batch effects in naive merge
-#-----------------------------------------------
- 
 # Define color palettes for visualization
 # 8 samples need 8 distinct, visible colors
 sample_colors <- c(

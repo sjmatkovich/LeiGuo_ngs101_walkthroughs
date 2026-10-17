@@ -1,0 +1,3 @@
+- [HTML code extraction](ngs101-html-code-extraction.md) — web fetch won't return code; parse saved HTML (SyntaxHighlighter), unescape twice
+- [Rmd conventions](ngs101-rmd-conventions.md) — YAML params rules, FIX/ADDED markers, hand-off files, naming, bugs fixed
+- [Workflow guidance](workflow-guidance.md) — plan first, static checks, no installs/commits without asking

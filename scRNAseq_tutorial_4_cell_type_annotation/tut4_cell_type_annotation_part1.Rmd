@@ -1,0 +1,359 @@
+---
+title: "ngs101_scRNAseq_walkthrough_4 - Cell type identification"
+subtitle: "part 1 - load integrated data, canonical markers, data-driven markers, manual annotation"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  integrated.rds: "integration_analysis/integrated_data/seurat_integrated_clustered.rds" # tut3 part3 output, relative to base.dir
+  annot.subdir: "cell_type_annotation" # output subdirectory under base.dir
+  species: "human" # for mito/ribo gene filters; options are "human" or "mouse"
+  seed: 42 # random seed
+  cluster.col: "seurat_clusters" # metadata column holding cluster IDs
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  condition.levels: ["Healthy", "Post_Treatment"] # condition labels, in the same order as condition.palette
+  condition.palette: ["#2E86AB", "#F18F01"] # UMAP colors for each condition level
+  umap.priority: ["umap.harmony", "umap.cca", "umap.rpca", "umap.mnn", "umap"] # first reduction found is used
+  norm.scale.factor: 10000 # LogNormalize scale factor
+  markers.min_pct: 0.25 # FindAllMarkers min.pct
+  markers.logfc: 0.25 # FindAllMarkers logfc.threshold
+  markers.top_n: 5 # top markers per cluster to tabulate and plot
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-4-cell-type-identification/>
+
+Part 1 of 3. Clusters from tutorial 3 are given biological identities by
+inspecting canonical marker genes and data-driven cluster markers, then
+assigning a manual label to each cluster. Parts 2 and 3 add automated
+annotation (SingleR, scType, scCATCH) and compare the methods.
+
+Code here follows the structure and settings described in the source article but
+was written for this notebook series (parameters pulled into the YAML front
+matter; paths built from `params`).
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)              # Main scRNA-seq toolkit
+library(SeuratObject)        # Seurat object infrastructure
+
+# Visualization and data manipulation
+library(ggplot2)             # Custom plots when needed
+library(patchwork)           # Combine plots
+library(dplyr)               # Data manipulation
+library(scales)              # Plot scales
+library(viridis)             # Color palettes
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_4_cell_type_annotation/tut4_cell_type_annotation_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+annot.dir <- file.path(base.dir, params$annot.subdir)
+
+# Create output directories
+for (d in c("plots/manual_annotation", "annotations")) {
+  if (!dir.exists(file.path(annot.dir, d))) dir.create(file.path(annot.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names and colors from params
+cluster.col <- params$cluster.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+condition.colors <- setNames(unlist(params$condition.palette), unlist(params$condition.levels))
+
+# Intermediate file passed on to part 2
+annotated_part1.file <- "integrated_manual_annotated_seurat.rds"
+```
+
+## Load integrated Seurat object from tutorial 3
+
+```{r step2_load_obj}
+integrated.file <- file.path(base.dir, params$integrated.rds)
+cat("Reading in integrated Seurat object:", integrated.file, "\n")
+integrated_seurat <- readRDS(integrated.file)
+
+cat("Cells:", ncol(integrated_seurat), " Genes:", nrow(integrated_seurat), "\n")
+cat("Assays:", paste(Assays(integrated_seurat), collapse = ", "), "\n")
+cat("Reductions:", paste(Reductions(integrated_seurat), collapse = ", "), "\n")
+
+stopifnot(cluster.col %in% colnames(integrated_seurat@meta.data))
+
+# Choose the first UMAP reduction from the priority list that is present
+umap_reduction <- intersect(params$umap.priority, Reductions(integrated_seurat))[1]
+if (is.na(umap_reduction)) stop("None of params$umap.priority found in object reductions")
+cat("Using UMAP reduction:", umap_reduction, "\n")
+```
+
+### Starting point: clusters, samples, conditions
+
+```{r step3_start_plots, fig.width = 14, fig.height = 10}
+p1 <- DimPlot(integrated_seurat, reduction = umap_reduction, group.by = cluster.col,
+              label = TRUE, label.size = 5, pt.size = 0.1) + ggtitle("Clusters")
+p2 <- DimPlot(integrated_seurat, reduction = umap_reduction, group.by = sample.col,
+              pt.size = 0.1) + ggtitle("Samples")
+p3 <- DimPlot(integrated_seurat, reduction = umap_reduction, group.by = condition.col,
+              pt.size = 0.1) +
+  scale_color_manual(values = condition.colors) + ggtitle("Condition")
+
+p_overview <- (p1 | p2) / (p3 | plot_spacer())
+print(p_overview)
+ggsave(file.path(annot.dir, "plots/00_starting_clusters.png"), p_overview,
+       width = 14, height = 10, dpi = params$plot.dpi)
+```
+
+## Normalize and scale the RNA assay
+
+Marker visualization and differential expression need log-normalized data and
+scaled values for heatmaps. Tutorial 3 may have left the object with split
+layers and `SCT` as the default assay, so the `RNA` assay is joined and
+normalized explicitly here.
+
+```{r step4_normalize}
+#-----------------------------------------------
+# STEP 1: Log-normalize and scale the RNA assay
+#-----------------------------------------------
+
+DefaultAssay(integrated_seurat) <- "RNA"
+
+# Seurat v5: merge per-sample layers into single counts/data layers
+integrated_seurat <- JoinLayers(integrated_seurat)
+
+integrated_seurat <- NormalizeData(integrated_seurat,
+                                   normalization.method = "LogNormalize",
+                                   scale.factor = params$norm.scale.factor,
+                                   verbose = FALSE)
+integrated_seurat <- ScaleData(integrated_seurat,
+                               features = rownames(integrated_seurat),
+                               verbose = FALSE)
+
+Idents(integrated_seurat) <- cluster.col
+```
+
+## Manual annotation: canonical marker genes
+
+Single markers are rarely sufficient; each cell type is checked against a small
+panel. This PBMC panel is specific to the example dataset (edit for other
+tissues).
+
+```{r step5_canonical_markers}
+#-----------------------------------------------
+# STEP 2: Canonical marker panel
+#-----------------------------------------------
+
+canonical_markers <- list(
+  "T_cells"            = c("CD3D", "CD3E", "CD3G"),
+  "CD4_T"              = c("CD3D", "CD4", "IL7R"),
+  "CD8_T"              = c("CD3D", "CD8A", "CD8B"),
+  "B_cells"            = c("CD79A", "MS4A1", "CD19"),
+  "NK_cells"           = c("NKG7", "GNLY", "NCAM1"),
+  "Monocytes"          = c("CD14", "LYZ", "S100A8", "S100A9"),
+  "Classical_Mono"     = c("CD14", "S100A8", "FCGR3A"),
+  "Non_Classical_Mono" = c("FCGR3A", "MS4A7"),
+  "Dendritic_cells"    = c("FCER1A", "CST3"),
+  "Plasmacytoid_DC"    = c("IL3RA", "GZMB", "SERPINF1"),
+  "Platelets"          = c("PPBP", "PF4", "GP9")
+)
+
+# Which markers are present in the object?
+all_genes <- rownames(integrated_seurat)
+canonical_present <- lapply(canonical_markers, function(g) g[g %in% all_genes])
+for (ct in names(canonical_markers)) {
+  cat(sprintf("%-20s %d/%d markers present\n", ct,
+              length(canonical_present[[ct]]), length(canonical_markers[[ct]])))
+}
+all_markers_present <- unique(unlist(canonical_present))
+```
+
+```{r step6_marker_plot_functions}
+#-----------------------------------------------
+# STEP 3: Helper functions for marker visualization
+#-----------------------------------------------
+
+plot_violin_markers <- function(obj, genes, suffix) {
+  if (length(genes) == 0) return(invisible(NULL))
+  p <- VlnPlot(obj, features = genes, group.by = cluster.col, pt.size = 0, ncol = 3)
+  ggsave(file.path(annot.dir, "plots/manual_annotation", paste0("violin_", suffix, ".png")),
+         p, width = 14, height = 4 * ceiling(length(genes) / 3), dpi = params$plot.dpi)
+  p
+}
+
+plot_umap_markers <- function(obj, genes, suffix) {
+  if (length(genes) == 0) return(invisible(NULL))
+  p <- FeaturePlot(obj, features = genes, reduction = umap_reduction, ncol = 4, pt.size = 0.1)
+  ggsave(file.path(annot.dir, "plots/manual_annotation", paste0("umap_", suffix, ".png")),
+         p, width = 16, height = 4 * ceiling(length(genes) / 4), dpi = params$plot.dpi)
+  p
+}
+```
+
+### Dot plot of all canonical markers
+
+```{r step7_dotplot, fig.width = 12, fig.height = 10}
+p_dot <- DotPlot(integrated_seurat, features = all_markers_present,
+                 group.by = cluster.col) + coord_flip()
+print(p_dot)
+ggsave(file.path(annot.dir, "plots/manual_annotation/dotplot_all_canonical_markers.png"),
+       p_dot, width = 12, height = 10, dpi = params$plot.dpi)
+```
+
+### Violin and UMAP plots by lineage
+
+```{r step8_lineage_plots, fig.width = 14, fig.height = 8}
+for (ct in names(canonical_present)) {
+  print(plot_violin_markers(integrated_seurat, canonical_present[[ct]], ct))
+  print(plot_umap_markers(integrated_seurat, canonical_present[[ct]], ct))
+}
+```
+
+## Manual annotation: data-driven cluster markers
+
+```{r step9_findallmarkers}
+#-----------------------------------------------
+# STEP 4: Find markers for every cluster
+#-----------------------------------------------
+
+# Exclude mitochondrial and ribosomal genes, species-dependent
+if (params$species == "human") {
+  exclude_regex <- "^RP[SL]|^MT-"
+} else if (params$species == "mouse") {
+  exclude_regex <- "^Rp[sl]|^mt-"
+} else {
+  stop("params$species must be 'human' or 'mouse'")
+}
+
+cluster_markers <- FindAllMarkers(integrated_seurat,
+                                  only.pos = TRUE,
+                                  min.pct = params$markers.min_pct,
+                                  logfc.threshold = params$markers.logfc,
+                                  verbose = FALSE)
+
+cluster_markers_filtered <- cluster_markers %>%
+  filter(!grepl(exclude_regex, gene))
+
+top_markers <- cluster_markers_filtered %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = params$markers.top_n) %>%
+  arrange(cluster, desc(avg_log2FC))
+
+write.csv(cluster_markers, file.path(annot.dir, "annotations/cluster_markers_all.csv"),
+          row.names = FALSE)
+write.csv(top_markers, file.path(annot.dir, "annotations/top_markers_per_cluster.csv"),
+          row.names = FALSE)
+
+print(as.data.frame(top_markers), row.names = FALSE)
+```
+
+```{r step10_heatmap, fig.width = 12, fig.height = 14}
+top_genes <- unique(top_markers$gene)
+p_heatmap <- DoHeatmap(integrated_seurat, features = top_genes,
+                       group.by = cluster.col, size = 3)
+print(p_heatmap)
+ggsave(file.path(annot.dir, "plots/manual_annotation/heatmap_top_markers.png"),
+       p_heatmap, width = 12, height = 14, dpi = params$plot.dpi)
+```
+
+## Manual annotation: assign cluster identities
+
+**The mapping below is the source article's example for GSE174609 and must be
+checked against the dot plot, violin plots and marker tables above for any new
+run (different clustering resolution = different cluster numbers).**
+
+```{r step11_manual_mapping, fig.width = 8, fig.height = 6}
+#-----------------------------------------------
+# STEP 5: Cluster -> cell type mapping (EDIT FOR YOUR DATA)
+#-----------------------------------------------
+
+cluster_to_celltype <- c(
+  "0"  = "CD4+ T cells",  "1"  = "CD4+ T cells", "2"  = "NK cells",
+  "3"  = "NK cells",      "4"  = "CD4+ T cells", "5"  = "NK cells",
+  "6"  = "Classical Mono", "7" = "B Cells",      "8"  = "CD8+ T Cells",
+  "9"  = "B Cells",       "10" = "CD4+ T cells", "11" = "CD4+ T cells",
+  "12" = "Monocytes",     "13" = "CD4+ T cells", "14" = "NK cells",
+  "15" = "NK cells",      "16" = "Platelets"
+)
+
+cluster_ids <- as.character(integrated_seurat@meta.data[[cluster.col]])
+missing_clusters <- setdiff(unique(cluster_ids), names(cluster_to_celltype))
+if (length(missing_clusters) > 0) {
+  warning("Clusters without a manual label: ", paste(missing_clusters, collapse = ", "))
+}
+
+integrated_seurat$manual_annotation <- unname(cluster_to_celltype[cluster_ids])
+
+print(table(integrated_seurat$manual_annotation, useNA = "ifany"))
+
+p_manual <- DimPlot(integrated_seurat, reduction = umap_reduction,
+                    group.by = "manual_annotation", label = TRUE, repel = TRUE,
+                    pt.size = 0.1) + ggtitle("Manual annotation")
+print(p_manual)
+ggsave(file.path(annot.dir, "plots/manual_annotation/umap_manual_annotation.png"),
+       p_manual, width = 9, height = 7, dpi = params$plot.dpi)
+```
+
+## Save object for part 2
+
+```{r step12_save}
+saveRDS(integrated_seurat, file.path(annot.dir, "annotations", annotated_part1.file))
+save(umap_reduction, cluster_to_celltype,
+     file = file.path(annot.dir, "annotations", "annot_part1.RData"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut4_annotation_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut4_annotation_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

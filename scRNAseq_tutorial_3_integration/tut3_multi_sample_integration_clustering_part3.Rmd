@@ -34,7 +34,7 @@ Primary source:
 library(Seurat)
 library(SeuratObject)
 library(BPCells)
-library(glmGamPoi) # speeds up SCTransform
+# library(glmGamPoi) # speeds up SCTransform
  
 # Integration methods
 library(harmony)
@@ -98,11 +98,12 @@ dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 # Object file names from Parts 1-2 integration analysis
 merged_naive.file <- "merged_naive.rds"
 
-## Use _with_integrations if integrations were evaluated on the entire merged_naive object
-# merged_integrations.file <- "merged_seurat_with_integrations.rds"
+## Use _with_integrations if integrations were performed on the entire merged_naive object
+merged_integrations.file <- "merged_seurat_with_integrations.rds"
 
-## Use _chosen_integration if integrations were evaluated on a subset of the merged_naive object and a single integration was implemented on the merged_naive object
-merged_integrations.file <- "merged_seurat_chosen_integration.rds"
+## Use _chosen_integration if integrations were evaluated on a subset of the merged_naive object and a single integration was then implemented on the merged_naive object
+## This has not been coded into the parts1-2 .Rmd files (2026-10) but could form a parallel workstream
+# merged_integrations.file <- "merged_seurat_chosen_integration.rds"
 
 # Set random seed for reproducibility
 set.seed(27)
@@ -121,8 +122,13 @@ theme_set(theme_classic(base_size = 12))
 cat("Reading in merged Seurat object with integration:",merged_integrations.file,"\n")
 merged_seurat_integrated <- readRDS(file.path(integr.dir,merged_integrations.file))
 
+# re-import mixing_results df and chosen_method and chosen_reduction text labels from part 2
 load(file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```
+
+## 2026-10-17: NEED TO INVESTIGATE HOW TO TREAT RE-IMPORTED INTEGRATED OBJECTS
+
+See how merged_integrations.file is defined above. Part 2 tutorial did not commit to a defined integration.
 
 ## Examine clustering at multiple resolutions
 
@@ -439,7 +445,7 @@ cat("\n=== Saving Final Results ===\n")
  
 # Save the final integrated object
 saveRDS(merged_seurat_integrated,
-        file.path(integr.dir,"integrated_data","seurat_integrated_clustered.rds")
+        file.path(integr.dir,"seurat_integrated_clustered.rds")
 )
  
 # Save metadata

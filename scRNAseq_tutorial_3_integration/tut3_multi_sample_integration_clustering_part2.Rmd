@@ -117,9 +117,6 @@ merged_seurat <- readRDS(file.path(integr.dir,merged_integrations.file))
 ## Visual comparison of UMAPs
 
 ```{r umap_comparison, fig.width = 16, fig.height = 12}
-#-----------------------------------------------
-# STEP 11: Generate comparison UMAPs
-#-----------------------------------------------
 
 sample_ids <- unique(merged_seurat@meta.data$sample_id)
 
@@ -200,12 +197,9 @@ ggsave(file.path(integr.dir,"plots/integration_comparison/03_integration_by_cond
 
 **How the mixing metric works**: For each cell, we find its k=50 nearest neighbors in the UMAP space and calculate the diversity of samples among those neighbors using the inverse Simpson’s Index. If all neighbors are from different samples (perfect mixing), the score is high. If all neighbors are from the same sample (poor integration), the score is low.
 
-k can be configured below
+k can be configured below.
 
 ```{r lisi, fig.width = 10, fig.height = 6}
-#-----------------------------------------------
-# STEP 12: Calculate integration quality metrics
-#-----------------------------------------------
 
 k_param <- 50
 
@@ -257,7 +251,7 @@ cat("(Higher mixing score = better sample mixing)\n\n")
 print(mixing_results)
  
 # Save metrics
-write.csv(mixing_results, "metadata/integration_comparison_metrics.csv", row.names = FALSE)
+write.csv(mixing_results, file.path(integr.dir,"metadata/integration_comparison_metrics.csv"), row.names = FALSE)
  
 # Visualize mixing scores
 p_mixing <- ggplot(mixing_results, aes(x = reorder(method, -mixing_score), y = mixing_score, fill = method)) +
@@ -271,7 +265,7 @@ p_mixing <- ggplot(mixing_results, aes(x = reorder(method, -mixing_score), y = m
   scale_fill_brewer(palette = "Set2")
 
 print(p_mixing)
-ggsave("plots/integration_comparison/04_mixing_scores.png", p_mixing, 
+ggsave(file.path(integr.dir,"plots/integration_comparison/04_mixing_scores.png"), p_mixing, 
        width = 10, height = 6, dpi = 300)
 ```
 
@@ -288,10 +282,7 @@ High distance = Conditions are well-separated (biological signal preserved) ✓
 Low distance = Conditions overlap (might have over-integrated, losing biology) ⚠️
 
 ```{r signal_preservation}
-#-----------------------------------------------
-# STEP 13: Assess biological signal preservation
-#-----------------------------------------------
- 
+
 # Function to test if conditions are still distinguishable after integration
 # Uses UMAP distances between conditions
 assess_condition_separation <- function(seurat_obj, reduction) {
@@ -345,7 +336,7 @@ p_tradeoff <- ggplot(mixing_results, aes(x = mixing_score, y = condition_separat
   scale_color_brewer(palette = "Set2")
 
 print(p_tradeoff)
-ggsave("plots/integration_comparison/05_mixing_vs_preservation.png", p_tradeoff,
+ggsave(file.path(integr.dir,"plots/integration_comparison/05_mixing_vs_preservation.png"), p_tradeoff,
        width = 10, height = 7, dpi = 300)
 ```
 
@@ -354,10 +345,7 @@ ggsave("plots/integration_comparison/05_mixing_vs_preservation.png", p_tradeoff,
 The primary ranking method below is the `mixing_score` (batch correction) rather than condition separation.
 
 ```{r integration_choice}
-#-----------------------------------------------
-# STEP 14: Select optimal integration method
-#-----------------------------------------------
- 
+
 # Rank methods by mixing score (primary criterion)
 mixing_results <- mixing_results[order(-mixing_results$mixing_score), ]
  
@@ -375,9 +363,9 @@ chosen_method <- mixing_results$method[1]
 cat("\nRecommended method:", chosen_method, "\n")
 ```
 
-*Review metrics above* before imnplementing reduction choice in the following code chunk (set to `eval = FALSE` by default)
+*Review metrics above* before defining reduction choice in the following code chunk (set to `eval = FALSE` by default)
 
-```{r implement_chosen_reduction, eval = FALSE}
+```{r define_chosen_reduction, eval = FALSE}
 # For subsequent analysis, we'll use the best method
 # In most cases, this will be Harmony or CCA
 if (chosen_method == "Harmony") {
@@ -396,9 +384,10 @@ if (chosen_method == "Harmony") {
   cat("Warning: Method not recognized, defaulting to CCA\n")
 }
  
-cat("\nUsing", chosen_method, "for downstream clustering analysis\n")
+cat("\nChoice:", chosen_method, "for downstream clustering analysis\n")
 
-save(chosen_method,
+save(mixing_results,
+     chosen_method,
      chosen_reduction,
      file = file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```

@@ -70,7 +70,6 @@ integr.dir <- file.path(base.dir, "integration_analysis")
 dir.create(file.path(integr.dir,"plots"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/integration_comparison"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/clustering"), showWarnings = FALSE)
-dir.create(file.path(integr.dir,"integrated_data"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 
 # Object file names from Parts 1-2 integration analysis
@@ -97,14 +96,14 @@ theme_set(theme_classic(base_size = 12))
 # merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
 
 cat("Reading in merged Seurat object with integration:",merged_integrations.file,"\n")
-merged_seurat_integrated <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
+merged_seurat_integrated <- readRDS(file.path(integr.dir,merged_integrations.file))
 
 load(file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```
 
 ## Examine clustering at multiple resolutions
 
-If using `RNA` assay rather than `SCT`, change `_snn_res` label in cluster calculator and renaming function below
+If using `SCT` assay rather than `RNA`, change `_snn_res` label in cluster calculator and renaming function below
 
 ```{r multiple_resolution_clusters, fig.width = 14, fig.height = 14}
 
@@ -122,12 +121,12 @@ for (res in resolutions) {
     verbose = TRUE
   )
  
-  n_clusters <- length(unique(merged_seurat_integrated@meta.data[[paste0("SCT_snn_res.", res)]]))
+  n_clusters <- length(unique(merged_seurat_integrated@meta.data[[paste0("RNA_snn_res.", res)]]))
   cat(sprintf("Resolution %.1f: %d clusters\n", res, n_clusters))
 }
  
 # Rename cluster columns for clarity
-colnames(merged_seurat_integrated@meta.data) <- gsub("SCT_snn_res\\.", "clusters_res_", 
+colnames(merged_seurat_integrated@meta.data) <- gsub("RNA_snn_res\\.", "clusters_res_", 
                                               colnames(merged_seurat_integrated@meta.data))
 
 #-----------------------------------------------

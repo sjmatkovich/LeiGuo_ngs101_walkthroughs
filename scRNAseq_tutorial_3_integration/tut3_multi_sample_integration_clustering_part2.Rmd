@@ -67,7 +67,6 @@ integr.dir <- file.path(base.dir, "integration_analysis")
 dir.create(file.path(integr.dir,"plots"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/integration_comparison"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/clustering"), showWarnings = FALSE)
-dir.create(file.path(integr.dir,"integrated_data"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 
 # Object file names from Part 1 integration analysis
@@ -86,9 +85,9 @@ theme_set(theme_classic(base_size = 12))
 ```{r step2_load_objs}
 
 cat("Reading in merged_naive Seurat object:",merged_naive.file,"\n")
-merged_naive <- readRDS(file.path(integr.dir,"integrated_data",merged_naive.file))
+merged_naive <- readRDS(file.path(integr.dir,merged_naive.file))
 cat("Reading in merged Seurat object with integrations:",merged_integrations.file,"\n")
-merged_seurat <- readRDS(file.path(integr.dir,"integrated_data",merged_integrations.file))
+merged_seurat <- readRDS(file.path(integr.dir,merged_integrations.file))
 
 ```
 

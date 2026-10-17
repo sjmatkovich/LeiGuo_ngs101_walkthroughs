@@ -1,0 +1,314 @@
+---
+title: "ngs101_scRNAseq_walkthrough_7-2 - Trajectory analysis with Slingshot"
+subtitle: "part 3 - validate the trajectory, test condition effects, find trajectory genes, return results to Seurat"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  traj.subdir: "trajectory_slingshot" # output subdirectory under base.dir (same as parts 1-2)
+  seed: 42 # random seed
+  condition.levels: ["Healthy", "Post_Treatment"] # condition labels, in the same order as condition.palette
+  condition.palette: ["#2E86AB", "#F18F01"] # plot colors for each condition level
+  marker.genes: ["CCR7", "LEF1", "TCF7", "CD69", "GZMB", "PRF1", "NKG7"] # validation markers correlated with pseudotime
+  gene.min_cells: 10 # minimum cells expressing a gene for it to be tested
+  gene.q: 0.05 # FDR cutoff for trajectory-associated genes
+  genes.top_n: 20 # number of top genes (by absolute correlation) printed
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-7-2-trajectory-analysis-using-slingshot/>
+
+Part 3 of 3. The Slingshot result from part 2 is checked against biology and
+used: known marker genes are correlated with pseudotime (naive markers such as
+CCR7, LEF1 and TCF7 should decrease; effector markers such as GZMB, PRF1 and
+NKG7 should increase), pseudotime is compared between conditions, genes
+correlated with pseudotime are identified, and pseudotime, lineage and lineage
+weights are added back to the Seurat object.
+
+The gene-wise Spearman correlation loop runs one `cor.test()` per gene over
+all genes in the object and is slow.
+
+Code is taken from the source article's code blocks (steps 11-14). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core trajectory analysis
+library(slingshot)
+library(SingleCellExperiment)
+library(princurve)
+library(TrajectoryUtils)
+
+# Single-cell analysis infrastructure
+library(Seurat)
+library(SeuratObject)
+
+# Data manipulation
+library(dplyr)
+library(tidyr)
+
+# Visualization
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+library(scales)
+library(grDevices)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_7-2_trajectory_slingshot/tut7-2_trajectory_slingshot_part3.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+traj.dir <- file.path(base.dir, params$traj.subdir)
+
+# Create organized output directories
+for (d in c("plots/pseudotime", "results")) {
+  if (!dir.exists(file.path(traj.dir, d))) dir.create(file.path(traj.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Condition levels and colors from params
+condition.colors <- setNames(unlist(params$condition.palette), unlist(params$condition.levels))
+```
+
+## Load objects from parts 1-2
+
+```{r step2_load_obj}
+# ADDED: hand-off from parts 1-2
+seurat_t_nk <- readRDS(file.path(traj.dir, "results/seurat_T_NK_subset.rds"))
+sce <- readRDS(file.path(traj.dir, "results/sce_T_NK_slingshot.rds"))
+load(file.path(traj.dir, "results/slingshot_part1.RData")) # umap_reduction
+load(file.path(traj.dir, "results/slingshot_part2.RData")) # curve_weights, umap_df
+
+stopifnot(identical(colnames(sce), colnames(seurat_t_nk)))
+cat("T/NK cells:", ncol(sce), "; lineages:", ncol(curve_weights), "\n")
+```
+
+## Biological validation: marker genes
+
+If the trajectory direction is biologically sensible, naive T cell markers
+(CCR7, LEF1, TCF7) should be negatively correlated with pseudotime and
+cytotoxic/effector markers (GZMB, PRF1, NKG7) positively correlated. The
+direction is set by the start cluster chosen in part 2; with an automatically
+chosen start, check this before interpreting the trajectory.
+
+```{r step3_markers}
+#-----------------------------------------------
+# STEP 11: Validate T/NK trajectory with marker genes
+#-----------------------------------------------
+
+# Test known T cell markers
+marker_genes <- unlist(params$marker.genes)
+available_markers <- marker_genes[marker_genes %in% rownames(sce)]
+
+if (length(available_markers) > 0) {
+  cat("Testing known markers along pseudotime...\n\n")
+
+  for (gene in available_markers) {
+    expr <- logcounts(sce)[gene, ]
+    # NOTE: `use` is not an argument of cor.test() and is ignored (cor.test
+    # already drops incomplete pairs)
+    cor_test <- cor.test(sce$slingshot_pseudotime, expr,
+                         method = "spearman", use = "complete.obs")
+
+    cat(sprintf("%s: correlation = %.3f, p-value = %.2e\n",
+                gene, cor_test$estimate, cor_test$p.value))
+  }
+}
+```
+
+## Treatment effects on the T/NK trajectory
+
+```{r step4_condition, fig.width = 10, fig.height = 7}
+#-----------------------------------------------
+# STEP 12: Test treatment effects on T/NK pseudotime
+#-----------------------------------------------
+
+# Statistical test
+wilcox_test <- wilcox.test(pseudotime ~ condition, data = umap_df)
+
+cat("Wilcoxon rank-sum test:\n")
+cat("  W statistic:", wilcox_test$statistic, "\n")
+cat("  P-value:", format(wilcox_test$p.value, scientific = TRUE), "\n\n")
+
+# Median by condition
+median_summary <- umap_df %>%
+  group_by(condition) %>%
+  summarise(
+    median_pt = median(pseudotime, na.rm = TRUE),
+    mean_pt = mean(pseudotime, na.rm = TRUE)
+  )
+
+cat("Pseudotime by condition:\n")
+print(as.data.frame(median_summary))
+
+# Density plot
+p_density <- ggplot(umap_df, aes(x = pseudotime, fill = condition)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_manual(values = condition.colors) +
+  labs(title = "T/NK Pseudotime Distribution by Condition",
+       x = "Pseudotime", y = "Density") +
+  theme_classic(base_size = 12)
+print(p_density)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/05_pseudotime_by_condition_T_NK.png"),
+       p_density, width = 10, height = 7, dpi = params$plot.dpi)
+```
+
+## Identify trajectory-associated genes
+
+Genes are ranked by Spearman correlation between log-normalized expression and
+the consensus pseudotime, using only the T/NK cells.
+
+```{r step5_trajectory_genes}
+#-----------------------------------------------
+# STEP 13: Identify pseudotime-dependent genes in T/NK lineage
+#-----------------------------------------------
+
+# Use T/NK SCE object (not all cell types!)
+expr_mat <- logcounts(sce)
+pt <- sce$slingshot_pseudotime
+
+cat("Testing", nrow(expr_mat), "genes across", ncol(sce), "T/NK cells\n\n")
+
+# Test correlations
+gene_results <- lapply(seq_len(nrow(expr_mat)), function(i) {
+  if (i %% 1000 == 0) cat("  Tested", i, "genes...\n")
+
+  gene_expr <- expr_mat[i, ]
+
+  if (sum(gene_expr > 0) < params$gene.min_cells) {
+    return(data.frame(gene = rownames(expr_mat)[i], correlation = NA, p_value = NA))
+  }
+
+  cor_test <- cor.test(pt, gene_expr, method = "spearman", exact = FALSE)
+
+  data.frame(
+    gene = rownames(expr_mat)[i],
+    correlation = as.numeric(cor_test$estimate),
+    p_value = cor_test$p.value
+  )
+})
+
+gene_results_df <- do.call(rbind, gene_results)
+gene_results_df <- gene_results_df[!is.na(gene_results_df$p_value), ]
+gene_results_df$q_value <- p.adjust(gene_results_df$p_value, method = "fdr")
+gene_results_df <- gene_results_df[order(abs(gene_results_df$correlation), decreasing = TRUE), ]
+
+sig_genes <- gene_results_df[gene_results_df$q_value < params$gene.q, ]
+
+cat("Significant genes (q <", params$gene.q, "):", nrow(sig_genes), "\n")
+cat("Positively correlated (increase along trajectory):", sum(sig_genes$correlation > 0), "\n")
+cat("Negatively correlated (decrease along trajectory):", sum(sig_genes$correlation < 0), "\n\n")
+
+cat("Top", params$genes.top_n, "genes:\n")
+print(head(sig_genes, params$genes.top_n))
+
+write.csv(sig_genes, file.path(traj.dir, "results/slingshot_T_NK_pseudotime_genes.csv"), row.names = FALSE)
+```
+
+## Integrate T/NK results back into Seurat
+
+```{r step6_to_seurat, fig.width = 16, fig.height = 6}
+#-----------------------------------------------
+# STEP 14: Transfer T/NK trajectory results to Seurat
+#-----------------------------------------------
+
+# Create Seurat object for T/NK cells with trajectory info
+seurat_t_nk$slingshot_pseudotime <- sce$slingshot_pseudotime
+seurat_t_nk$slingshot_lineage <- sce$primary_lineage
+
+# Add lineage weights
+for (i in 1:ncol(curve_weights)) {
+  seurat_t_nk@meta.data[[paste0("lineage_", i, "_weight")]] <- curve_weights[, i]
+}
+
+# Visualize in Seurat
+p_seurat_pseudotime <- FeaturePlot(
+  seurat_t_nk,
+  features = "slingshot_pseudotime",
+  reduction = umap_reduction,
+  pt.size = 1
+) +
+  scale_color_viridis(option = "plasma") +
+  ggtitle("T/NK Slingshot Pseudotime (Seurat)")
+
+p_seurat_lineage <- DimPlot(
+  seurat_t_nk,
+  group.by = "slingshot_lineage",
+  reduction = umap_reduction,
+  pt.size = 1
+) +
+  ggtitle("T/NK Lineage Assignment (Seurat)")
+
+p_combined <- p_seurat_pseudotime | p_seurat_lineage
+print(p_combined)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/06_slingshot_T_NK_in_seurat.png"),
+       p_combined, width = 16, height = 6, dpi = params$plot.dpi)
+
+# Save T/NK object with trajectory
+saveRDS(seurat_t_nk, file.path(traj.dir, "results/seurat_T_NK_with_slingshot.rds"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut7-2_slingshot_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut7-2_slingshot_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

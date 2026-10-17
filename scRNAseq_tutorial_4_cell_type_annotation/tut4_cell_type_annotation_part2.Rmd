@@ -6,12 +6,12 @@ date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
   annot.subdir: "cell_type_annotation" # output subdirectory under base.dir (same as part 1)
-  species: "human" # options are "human" or "mouse"; note celldex/scType references used here are human
+  species: "human" # options are "human" or "mouse"; note the celldex/scType references used here are human
   seed: 42 # random seed
   cluster.col: "seurat_clusters" # metadata column holding cluster IDs
   singler.ref: "monaco" # reference whose labels are carried forward; one of "hpca", "monaco", "dice"
-  sctype.db_url: "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx" # scType marker database
   sctype.fn_url: "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R" # scType function scripts
+  sctype.db_url: "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx" # scType marker database
   sctype.tissue: "Immune system" # tissue type in the scType database
   sctype.unknown_quantile: 0.6 # cluster top scores below this quantile are labelled "Unknown"
   sccatch.tissue: "Blood" # scCATCH tissue
@@ -45,33 +45,45 @@ Part 2 of 3. Three automated annotation approaches are run on the object saved
 by part 1:
 
 - **SingleR**: reference-based (correlation to labelled reference profiles); the
-  article recommends `MonacoImmuneData` for PBMCs (HPCA is broad, DICE is less
+  article uses `MonacoImmuneData` for PBMCs (HPCA is broad, DICE is less
   granular).
 - **scType**: marker-based gene set scoring per cluster.
 - **scCATCH**: tissue-specific marker database matching per cluster.
 
 No single method is authoritative. Part 3 compares them.
 
+Code is taken from the source article's code blocks (steps 9-14). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
 ## Libraries and directories
 
 ```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
 
 # Core single-cell analysis
-library(Seurat)              # Main scRNA-seq toolkit
-library(SeuratObject)        # Seurat object infrastructure
+library(Seurat)
+library(SeuratObject)
 
-# Annotation packages
-library(SingleR)             # Reference-based annotation
-library(celldex)             # Reference datasets
-library(scCATCH)             # Tissue-specific marker matching
-library(SingleCellExperiment) # SCE objects
-library(HGNChelper)          # Gene symbol checking, used by scType
-library(openxlsx)            # Reads scType database
+# Automated annotation methods
+library(SingleR)
+library(celldex)
+library(scCATCH)
+
+# Data structures
+library(SingleCellExperiment)
+
+# Marker processing
+library(HGNChelper)
+library(openxlsx) # reads the scType database
 
 # Visualization and data manipulation
-library(ggplot2)             # Custom plots when needed
-library(patchwork)           # Combine plots
-library(dplyr)               # Data manipulation
+library(ggplot2)
+library(dplyr)
+library(patchwork)
 
 if (!exists("params") || !is.list(params)) {
   # Running interactively (e.g. via "Run Cell") rather than through
@@ -122,6 +134,7 @@ if (params$species != "human") {
 ## Load object from part 1
 
 ```{r step2_load_obj}
+# ADDED: hand-off from part 1
 integrated_seurat <- readRDS(file.path(annot.dir, "annotations", annotated_part1.file))
 load(file.path(annot.dir, "annotations", "annot_part1.RData")) # umap_reduction, cluster_to_celltype
 
@@ -136,55 +149,111 @@ SingleR compares the expression of each cell with labelled reference profiles
 and assigns the best-correlated label. It cannot assign a type that is absent
 from the reference.
 
+### Test multiple references
+
 ```{r step3_singler, message = FALSE}
 #-----------------------------------------------
-# STEP 6: SingleR with three references
+# STEP 9: SingleR with multiple reference datasets
 #-----------------------------------------------
 
+# Convert Seurat to SingleCellExperiment for SingleR
 sce <- as.SingleCellExperiment(integrated_seurat)
 
-singler_refs <- list(
-  hpca   = celldex::HumanPrimaryCellAtlasData(),
-  monaco = celldex::MonacoImmuneData(),
-  dice   = celldex::DatabaseImmuneCellExpressionData()
+# Reference 1: HumanPrimaryCellAtlas (Broad)
+hpca_ref <- celldex::HumanPrimaryCellAtlasData()
+
+singler_hpca <- SingleR(
+  test = sce,
+  ref = hpca_ref,
+  labels = hpca_ref$label.main,
+  assay.type.test = "logcounts"
 )
 
-singler_results <- lapply(singler_refs, function(ref) {
-  SingleR(test = sce, ref = ref, labels = ref$label.main, assay.type.test = "logcounts")
-})
+integrated_seurat$singler_hpca <- singler_hpca$labels
 
-for (nm in names(singler_results)) {
-  integrated_seurat[[paste0("singler_", nm)]] <- singler_results[[nm]]$labels
-}
+# Reference 2: MonacoImmuneData (Immune-Specific)
+monaco_ref <- celldex::MonacoImmuneData()
 
-stopifnot(params$singler.ref %in% names(singler_results))
-integrated_seurat$singler_annotation <- integrated_seurat[[paste0("singler_", params$singler.ref)]][, 1]
+singler_monaco <- SingleR(
+  test = sce,
+  ref = monaco_ref,
+  labels = monaco_ref$label.main,
+  assay.type.test = "logcounts"
+)
+
+integrated_seurat$singler_monaco <- singler_monaco$labels
+
+# Reference 3: DatabaseImmuneCellExpression
+dice_ref <- celldex::DatabaseImmuneCellExpressionData()
+
+singler_dice <- SingleR(
+  test = sce,
+  ref = dice_ref,
+  labels = dice_ref$label.main,
+  assay.type.test = "logcounts"
+)
+
+integrated_seurat$singler_dice <- singler_dice$labels
 ```
 
-### Compare the three references
+### Compare references
 
 ```{r step4_singler_compare, fig.width = 16, fig.height = 12}
-ref_plots <- lapply(names(singler_results), function(nm) {
-  DimPlot(integrated_seurat, reduction = umap_reduction, group.by = paste0("singler_", nm),
-          label = TRUE, repel = TRUE, label.size = 3, pt.size = 0.1) +
-    ggtitle(paste("SingleR:", nm)) + NoLegend()
-})
-p_ref <- wrap_plots(ref_plots, ncol = 2)
-print(p_ref)
-ggsave(file.path(annot.dir, "plots/automated_annotation/singler_reference_comparison.png"),
-       p_ref, width = 16, height = 12, dpi = params$plot.dpi)
+#-----------------------------------------------
+# STEP 10: Compare SingleR references
+#-----------------------------------------------
 
-for (nm in names(singler_results)) {
-  cat("\n", nm, "- number of labels:", length(unique(integrated_seurat[[paste0("singler_", nm)]][, 1])), "\n")
-  print(sort(table(integrated_seurat[[paste0("singler_", nm)]][, 1]), decreasing = TRUE))
-}
+# Visualize all three references
+p_hpca <- DimPlot(integrated_seurat, reduction = umap_reduction,
+                  group.by = "singler_hpca", pt.size = 0.1) +
+  labs(title = "HPCA Reference") +
+  theme(legend.text = element_text(size = 7))
+
+p_monaco <- DimPlot(integrated_seurat, reduction = umap_reduction,
+                    group.by = "singler_monaco", pt.size = 0.1) +
+  labs(title = "Monaco Reference") +
+  theme(legend.text = element_text(size = 7))
+
+p_dice <- DimPlot(integrated_seurat, reduction = umap_reduction,
+                  group.by = "singler_dice", pt.size = 0.1) +
+  labs(title = "DICE Reference") +
+  theme(legend.text = element_text(size = 7))
+
+p_manual_ref <- DimPlot(integrated_seurat, reduction = umap_reduction,
+                        group.by = "manual_annotation", pt.size = 0.1) +
+  labs(title = "Manual") +
+  theme(legend.text = element_text(size = 7))
+
+p_ref_comparison <- (p_manual_ref | p_hpca) / (p_monaco | p_dice)
+print(p_ref_comparison)
+
+ggsave(file.path(annot.dir, "plots/automated_annotation/10_singler_reference_comparison.png"),
+       p_ref_comparison, width = 16, height = 12, dpi = params$plot.dpi)
 ```
 
-```{r step5_singler_save}
-write.csv(data.frame(cell_barcode = colnames(integrated_seurat),
-                     cluster = integrated_seurat@meta.data[[cluster.col]],
-                     integrated_seurat@meta.data[, paste0("singler_", names(singler_results))]),
-          file.path(annot.dir, "annotations/singler_annotations.csv"), row.names = FALSE)
+```{r step4b_singler_choose, fig.width = 11, fig.height = 8}
+# For this tutorial, we'll use Monaco as the primary SingleR annotation
+# (reference chosen by params$singler.ref)
+stopifnot(params$singler.ref %in% c("hpca", "monaco", "dice"))
+integrated_seurat$singler_annotation <-
+  integrated_seurat@meta.data[[paste0("singler_", params$singler.ref)]]
+
+# Visualize chosen reference
+p_singler_final <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "singler_annotation",
+  label = TRUE,
+  label.size = 3,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle(paste0("SingleR Annotation (", params$singler.ref, " Reference)")) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+print(p_singler_final)
+
+ggsave(file.path(annot.dir, "plots/automated_annotation/11_singler_final_annotation.png"),
+       p_singler_final, width = 11, height = 8, dpi = params$plot.dpi)
 ```
 
 ## scType: marker-based gene set scoring
@@ -193,112 +262,186 @@ Each cell's scaled expression is scored against positive (and negative) marker
 sets for each cell type in the database, scores are summed per cluster, and
 each cluster takes its top-scoring type.
 
-```{r step6_sctype_load, message = FALSE}
+```{r step5_sctype_load, message = FALSE}
 #-----------------------------------------------
-# STEP 7: Load scType functions and marker database
+# STEP 11: Load scType functions
 #-----------------------------------------------
 
+# Load scType functions from GitHub
 source(file.path(params$sctype.fn_url, "gene_sets_prepare.R"))
 source(file.path(params$sctype.fn_url, "sctype_score_.R"))
 
-sctype.db <- file.path(annot.dir, "annotations", "ScTypeDB_full.xlsx")
-if (!file.exists(sctype.db)) {
-  download.file(params$sctype.db_url, sctype.db, mode = "wb", quiet = TRUE)
-}
+#-----------------------------------------------
+# STEP 12: Load scType marker database
+#-----------------------------------------------
 
-gs_list <- gene_sets_prepare(sctype.db, params$sctype.tissue)
-cat("Cell types in database for", params$sctype.tissue, ":", length(gs_list$gs_positive), "\n")
+# Download the full database
+db_url <- params$sctype.db_url
+temp_file <- tempfile(fileext = ".xlsx")
+download.file(db_url, destfile = temp_file, mode = "wb")
+
+# Read the database for immune system
+db <- read.xlsx(temp_file)
+db_immune <- db[db$tissueType == params$sctype.tissue, ]
+
+# Prepare gene sets
+gs_list <- gene_sets_prepare(temp_file, params$sctype.tissue)
+
+cat("Available cell types in database:\n")
+print(names(gs_list$gs_positive))
 ```
 
-```{r step7_sctype_score, fig.width = 8, fig.height = 6}
+```{r step6_sctype_score, fig.width = 11, fig.height = 8}
 #-----------------------------------------------
-# STEP 8: Score cells and assign cluster-level types
+# STEP 13: Calculate scType scores
 #-----------------------------------------------
 
+# Get scaled data
 scaled_data <- as.matrix(LayerData(integrated_seurat, layer = "scale.data"))
 
-es_max <- sctype_score(scRNAseqData = scaled_data, scaled = TRUE,
-                       gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+# Calculate scores
+es_max <- sctype_score(
+  scRNAseqData = scaled_data,
+  scaled = TRUE,
+  gs = gs_list$gs_positive,
+  gs2 = gs_list$gs_negative
+)
 
-clusters <- as.character(integrated_seurat@meta.data[[cluster.col]])
-cell_ids <- colnames(integrated_seurat)
+# Assign cell types to clusters
+clusters <- integrated_seurat@meta.data[[cluster.col]]
+cL_results <- do.call("rbind", lapply(unique(clusters), function(cl) {
+  es_max_cl <- sort(rowSums(es_max[, clusters == cl]), decreasing = TRUE)
 
-cL_results <- do.call(rbind, lapply(unique(clusters), function(cl) {
-  es_cl <- sort(rowSums(es_max[, cell_ids[clusters == cl], drop = FALSE]), decreasing = TRUE)
-  data.frame(cluster = cl, type = names(es_cl)[1], scores = es_cl[[1]],
-             ncells = sum(clusters == cl), stringsAsFactors = FALSE)
+  top_score <- es_max_cl[1]
+  top_type <- names(es_max_cl)[1]
+
+  data.frame(
+    cluster = cl,
+    type = top_type,
+    scores = top_score,
+    ncells = sum(clusters == cl)
+  )
 }))
 
-# Low-scoring clusters are labelled "Unknown"
+# Filter low-confidence assignments
+# NOTE: a quantile cutoff is relative to the other clusters, so with 0.6 about
+# 60% of clusters are labelled "Unknown" by construction; lower
+# params$sctype.unknown_quantile if that is too aggressive
 score_threshold <- quantile(cL_results$scores, params$sctype.unknown_quantile)
-cL_results$type_raw <- cL_results$type
 cL_results$type[cL_results$scores < score_threshold] <- "Unknown"
-print(cL_results[order(as.numeric(cL_results$cluster)), ], row.names = FALSE)
 
-integrated_seurat$sctype_annotation <- cL_results$type[match(clusters, cL_results$cluster)]
+# Create mapping and apply to cells
+cluster_to_sctype <- setNames(cL_results$type, cL_results$cluster)
+integrated_seurat$sctype_annotation <- unname(cluster_to_sctype[
+  as.character(integrated_seurat@meta.data[[cluster.col]])
+])
 
-write.csv(cL_results, file.path(annot.dir, "annotations/sctype_cluster_results.csv"), row.names = FALSE)
-
-p_sctype <- DimPlot(integrated_seurat, reduction = umap_reduction, group.by = "sctype_annotation",
-                    label = TRUE, repel = TRUE, pt.size = 0.1) + ggtitle("scType")
+# Visualize
+p_sctype <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "sctype_annotation",
+  label = TRUE,
+  label.size = 4,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("scType: Marker-Based Annotation") +
+  theme(plot.title = element_text(face = "bold", size = 14))
 print(p_sctype)
-ggsave(file.path(annot.dir, "plots/automated_annotation/umap_sctype.png"),
-       p_sctype, width = 9, height = 7, dpi = params$plot.dpi)
-```
 
-Note: with `sctype.unknown_quantile = 0.6`, roughly 60% of clusters will be
-labelled `Unknown` by construction, since the cutoff is relative to the other
-clusters' scores. Lower the quantile (or use a fixed cutoff) if that is too
-aggressive.
+ggsave(file.path(annot.dir, "plots/automated_annotation/12_sctype_annotation.png"), p_sctype,
+       width = 11, height = 8, dpi = params$plot.dpi)
+
+# Save scType results
+write.csv(cL_results, file.path(annot.dir, "annotations/sctype_cluster_scores.csv"), row.names = FALSE)
+```
 
 ## scCATCH: tissue-specific automated annotation
 
 scCATCH finds cluster-specific marker genes and matches them to a curated
 tissue-specific database (`cellmatch`).
 
-```{r step8_sccatch, message = FALSE, fig.width = 8, fig.height = 6}
+```{r step7_sccatch, message = FALSE, fig.width = 11, fig.height = 8}
 #-----------------------------------------------
-# STEP 9: scCATCH
+# STEP 14: scCATCH annotation
 #-----------------------------------------------
 
 sccatch_species <- c(human = "Human", mouse = "Mouse")[[params$species]]
 
-obj_sccatch <- createscCATCH(data = LayerData(integrated_seurat, layer = "data"),
-                             cluster = clusters)
+# Prepare data for scCATCH
+obj_sccatch <- createscCATCH(
+  data = LayerData(integrated_seurat, layer = "data"),
+  cluster = as.character(integrated_seurat@meta.data[[cluster.col]])
+)
 
-obj_sccatch <- findmarkergene(object = obj_sccatch,
-                              species = sccatch_species,
-                              marker = cellmatch,
-                              tissue = params$sccatch.tissue,
-                              cancer = params$sccatch.cancer,
-                              cell_min_pct = params$sccatch.cell_min_pct,
-                              logfc = params$sccatch.logfc,
-                              pvalue = params$sccatch.pvalue)
+# Find marker genes for each cluster
+obj_sccatch <- findmarkergene(
+  object = obj_sccatch,
+  species = sccatch_species,
+  marker = cellmatch,
+  tissue = params$sccatch.tissue,
+  cancer = params$sccatch.cancer,
+  cell_min_pct = params$sccatch.cell_min_pct,
+  logfc = params$sccatch.logfc,
+  pvalue = params$sccatch.pvalue
+)
 
+# Find cell types based on markers
 obj_sccatch <- findcelltype(obj_sccatch)
 
+# Extract results
 sccatch_celltype <- obj_sccatch@celltype
-print(sccatch_celltype[, intersect(c("cluster", "cell_type", "celltype_score"), colnames(sccatch_celltype))],
-      row.names = FALSE)
 
-sccatch_lookup <- setNames(as.character(sccatch_celltype$cell_type), as.character(sccatch_celltype$cluster))
-integrated_seurat$sccatch_annotation <- unname(sccatch_lookup[clusters])
-integrated_seurat$sccatch_annotation[is.na(integrated_seurat$sccatch_annotation) |
-                                       integrated_seurat$sccatch_annotation == "Unclassified"] <- "Unknown"
+# Create cluster to cell type mapping
+cluster_to_sccatch <- setNames(
+  sccatch_celltype$cell_type,
+  sccatch_celltype$cluster
+)
 
-write.csv(sccatch_celltype, file.path(annot.dir, "annotations/sccatch_cluster_results.csv"), row.names = FALSE)
-write.csv(obj_sccatch@markergene, file.path(annot.dir, "annotations/sccatch_marker_evidence.csv"), row.names = FALSE)
+# Apply to all cells
+integrated_seurat$sccatch_annotation <- unname(cluster_to_sccatch[
+  as.character(integrated_seurat@meta.data[[cluster.col]])
+])
 
-p_sccatch <- DimPlot(integrated_seurat, reduction = umap_reduction, group.by = "sccatch_annotation",
-                     label = TRUE, repel = TRUE, pt.size = 0.1) + ggtitle("scCATCH")
+# Handle unmapped clusters
+integrated_seurat$sccatch_annotation[
+  is.na(integrated_seurat$sccatch_annotation)
+] <- "Unknown"
+
+# Visualize
+p_sccatch <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "sccatch_annotation",
+  label = TRUE,
+  label.size = 4,
+  pt.size = 0.1,
+  repel = TRUE
+) +
+  ggtitle("scCATCH: Tissue-Specific Database") +
+  theme(plot.title = element_text(face = "bold", size = 14))
 print(p_sccatch)
-ggsave(file.path(annot.dir, "plots/automated_annotation/umap_sccatch.png"),
-       p_sccatch, width = 9, height = 7, dpi = params$plot.dpi)
+
+ggsave(file.path(annot.dir, "plots/automated_annotation/13_sccatch_annotation.png"), p_sccatch,
+       width = 11, height = 8, dpi = params$plot.dpi)
+
+# Save detailed results
+write.csv(sccatch_celltype,
+          file.path(annot.dir, "annotations/sccatch_cluster_assignments.csv"),
+          row.names = FALSE)
+
+# Save marker evidence
+marker_evidence <- obj_sccatch@markergene
+write.csv(marker_evidence,
+          file.path(annot.dir, "annotations/sccatch_marker_evidence.csv"),
+          row.names = FALSE)
 ```
 
 ## Save object for part 3
 
-```{r step9_save}
+```{r step8_save}
+# ADDED: hand-off to part 3
 saveRDS(integrated_seurat, file.path(annot.dir, "annotations", annotated_part2.file))
 ```
 

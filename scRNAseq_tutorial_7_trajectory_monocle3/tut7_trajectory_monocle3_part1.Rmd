@@ -1,0 +1,400 @@
+---
+title: "ngs101_scRNAseq_walkthrough_7 - Trajectory and pseudotime analysis with Monocle 3"
+subtitle: "part 1 - load annotated data, downsample, convert to Monocle 3, preprocess"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
+  annotated.rds: "annotations/integrated_annotated_seurat.rds" # tutorial 4 part 3 output, relative to base.dir/annot.subdir
+  traj.subdir: "trajectory_analysis" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  condition.levels: ["Healthy", "Post_Treatment"] # condition labels, in the same order as condition.palette
+  condition.palette: ["#2E86AB", "#F18F01"] # plot colors for each condition level
+  umap.priority: ["umap.harmony", "umap.cca", "umap.rpca", "umap.mnn", "umap"] # first reduction found is used
+  exclude.celltypes: ["Platelets"] # cell types too rare for trajectory analysis
+  downsample.fraction: 0.1 # fraction of cells kept per cell type
+  downsample.min_cells: 50 # minimum cells kept per cell type (rare types)
+  pp.num_dim: 50 # preprocess_cds number of PCA dimensions
+  pp.norm_method: "log" # preprocess_cds normalization method
+  pp.scaling: true # preprocess_cds: scale genes (mean 0, variance 1)
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-7-trajectory-and-pseudotime-analysis-using-monocle-3/>
+
+Part 1 of 3. Trajectory (pseudotime) analysis orders cells along continuous
+transitions between cell states. Starting from the annotated Seurat object from
+tutorial 4, this notebook:
+
+1. downsamples each cell type to keep the Monocle 3 steps tractable (rare cell
+   types excluded);
+2. converts the Seurat object to a Monocle 3 `cell_data_set` (CDS) with
+   SeuratWrappers;
+3. runs `preprocess_cds()` (normalization + PCA);
+4. copies the Seurat UMAP coordinates into the CDS, so that the trajectory is
+   drawn on the same embedding used in earlier tutorials.
+
+Part 2 learns the trajectory graph and orders cells; part 3 interprets the result.
+
+Code is taken from the source article's code blocks (steps 1-7). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+library(SeuratWrappers)
+
+# Trajectory inference
+library(monocle3)
+
+# Data manipulation and visualization
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+traj.dir <- file.path(base.dir, params$traj.subdir)
+
+# Create output directories
+for (d in c("plots", "plots/trajectories", "plots/pseudotime",
+            "plots/genes_over_pseudotime", "results")) {
+  if (!dir.exists(file.path(traj.dir, d))) dir.create(file.path(traj.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names, condition levels and colors from params
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+condition.colors <- setNames(unlist(params$condition.palette), unlist(params$condition.levels))
+```
+
+## Understanding the Monocle 3 workflow
+
+Seurat object -> downsample -> `cell_data_set` -> `preprocess_cds()` ->
+UMAP alignment (part 1) -> `cluster_cells()` -> `learn_graph()` ->
+`order_cells()` (part 2) -> interpretation and trajectory genes (part 3).
+
+## Load annotated Seurat object from tutorial 4
+
+```{r step2_load_obj}
+#-----------------------------------------------
+# STEP 2: Load annotated Seurat object from Part 4
+#-----------------------------------------------
+
+# Load the complete annotated object
+annotated.file <- file.path(base.dir, params$annot.subdir, params$annotated.rds)
+cat("Reading in annotated Seurat object:", annotated.file, "\n")
+seurat_full <- readRDS(annotated.file)
+
+stopifnot(all(c(celltype.col, sample.col, condition.col) %in% colnames(seurat_full@meta.data)))
+
+# Verify data structure
+cat("Original dataset:\n")
+cat("  Total cells:", ncol(seurat_full), "\n")
+cat("  Total genes:", nrow(seurat_full), "\n")
+cat("  Samples:", length(unique(seurat_full@meta.data[[sample.col]])), "\n")
+cat("  Cell types:", length(unique(seurat_full@meta.data[[celltype.col]])), "\n\n")
+
+# Check cell type distribution
+cat("Cell type distribution (full dataset):\n")
+cell_type_counts <- table(seurat_full@meta.data[[celltype.col]])
+print(cell_type_counts)
+cat("\n")
+```
+
+## Strategic downsampling: maintaining biological diversity
+
+Sampling a fixed fraction from every cell type keeps all cell types represented
+(unlike sampling at random from the whole dataset, which can lose rare types)
+while reducing the computation required by Monocle 3.
+
+```{r step3_downsample}
+#-----------------------------------------------
+# STEP 3: Downsample to a fraction of cells per cell type (exclude rare types)
+#-----------------------------------------------
+
+# Set seed for reproducible downsampling
+set.seed(params$seed)
+
+# Get unique cell types and exclude rare cell types (Platelets in the article;
+# too rare for trajectory analysis)
+all_cell_types <- unique(seurat_full@meta.data[[celltype.col]])
+cell_types <- all_cell_types[!all_cell_types %in% unlist(params$exclude.celltypes)]
+
+cat("Cell types to analyze (excluding ", paste(unlist(params$exclude.celltypes), collapse = ", "), "):\n", sep = "")
+print(cell_types)
+cat("\n")
+
+# Sample a fraction from each cell type
+downsampled_cells <- c()
+
+for (cell_type in cell_types) {
+  # Get cells of this type
+  cells_of_type <- colnames(seurat_full)[seurat_full@meta.data[[celltype.col]] == cell_type]
+
+  # Calculate fraction (with a minimum number of cells for rare types)
+  n_sample <- max(params$downsample.min_cells, round(length(cells_of_type) * params$downsample.fraction))
+
+  # Don't sample more cells than exist
+  n_sample <- min(n_sample, length(cells_of_type))
+
+  # Random sample
+  sampled <- sample(cells_of_type, n_sample)
+  downsampled_cells <- c(downsampled_cells, sampled)
+
+  cat(sprintf("  %s: %d → %d cells (%.1f%%)\n",
+              cell_type, length(cells_of_type), n_sample,
+              100 * n_sample / length(cells_of_type)))
+}
+
+# Create downsampled Seurat object
+seurat_subset <- subset(seurat_full, cells = downsampled_cells)
+
+cat("\n")
+cat("Downsampled dataset:\n")
+cat("  Total cells:", ncol(seurat_subset), "\n")
+cat("  Cell types retained:", length(unique(seurat_subset@meta.data[[celltype.col]])), "\n")
+cat("  Reduction from full dataset:",
+    round(100 * (1 - ncol(seurat_subset)/ncol(seurat_full)), 1), "%\n")
+
+# Verify cell type representation
+cat("\nCell type distribution (downsampled):\n")
+print(table(seurat_subset@meta.data[[celltype.col]]))
+```
+
+## Visualize the downsampled dataset
+
+```{r step4_overview, fig.width = 16, fig.height = 12}
+#-----------------------------------------------
+# STEP 4: Visualize downsampled data
+#-----------------------------------------------
+
+# Check which UMAP is available (from Part 3 integration)
+available_reductions <- names(seurat_subset@reductions)
+umap_reduction <- intersect(unlist(params$umap.priority), available_reductions)[1]
+if (is.na(umap_reduction)) stop("None of params$umap.priority found in object reductions: ",
+                                paste(available_reductions, collapse = ", "))
+
+cat("Using UMAP reduction:", umap_reduction, "\n\n")
+
+# Create multi-panel overview
+p1 <- DimPlot(seurat_subset, reduction = umap_reduction,
+              group.by = celltype.col, label = TRUE,
+              label.size = 3.5, pt.size = 0.8, repel = TRUE) +
+  ggtitle("Cell Types (Downsampled Data)") +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "right")
+
+p2 <- DimPlot(seurat_subset, reduction = umap_reduction,
+              group.by = condition.col, pt.size = 0.8) +
+  ggtitle("Condition Distribution") +
+  scale_color_manual(values = condition.colors) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+p3 <- DimPlot(seurat_subset, reduction = umap_reduction,
+              group.by = sample.col, pt.size = 0.8) +
+  ggtitle("Sample Distribution") +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(size = 8))
+
+# Combine plots
+p_overview <- (p1 | p2) / (p3 | plot_spacer())
+print(p_overview)
+
+ggsave(file.path(traj.dir, "plots/01_downsampled_data_overview.png"), p_overview,
+       width = 16, height = 12, dpi = params$plot.dpi)
+
+cat("Saved: plots/01_downsampled_data_overview.png\n")
+```
+
+## Convert the Seurat object to a Monocle 3 CDS
+
+```{r step5_convert_cds}
+#-----------------------------------------------
+# STEP 5: Convert Seurat to Monocle 3 CDS object using SeuratWrappers
+#-----------------------------------------------
+
+# Convert Seurat object to cell_data_set
+# This automatically transfers counts, metadata, and reductions
+cds <- as.cell_data_set(seurat_subset)
+
+cat("Created Monocle 3 cell_data_set using SeuratWrappers:\n")
+cat("  Cells:", ncol(cds), "\n")
+cat("  Genes:", nrow(cds), "\n")
+cat("  Cell metadata columns:", ncol(colData(cds)), "\n\n")
+
+# Monocle 3's plot_cells() requires this for gene plotting
+# Add gene names to rowData
+rowData(cds)$gene_short_name <- rownames(cds)
+
+cat("Fixed gene names for Monocle 3 compatibility\n")
+cat("  Gene names set:", "gene_short_name" %in% colnames(rowData(cds)), "\n")
+cat("  First 5 genes:", head(rowData(cds)$gene_short_name, 5), "\n\n")
+
+# Verify what was transferred
+cat("Verifying transferred information:\n")
+cat("  Expression data: counts layer =",
+    !is.null(counts(cds)), "\n")
+cat("  Cell metadata: ", celltype.col, " =",
+    celltype.col %in% colnames(colData(cds)), "\n")
+cat("  Gene names: gene_short_name =",
+    "gene_short_name" %in% colnames(rowData(cds)), "\n")
+```
+
+The CDS object structure (from SingleCellExperiment):
+
+- assays: expression matrices (counts, logcounts, etc.)
+- colData: cell metadata (cell types, conditions, etc.)
+- rowData: gene metadata (gene names, IDs, etc.)
+- reducedDims: dimensionality reductions (PCA, UMAP, etc.)
+
+The article also shows a manual construction of the CDS, which it does not use
+(`eval = FALSE` here):
+
+```{r step5b_manual_cds, eval = FALSE}
+# Manual approach (optional - not used in this tutorial)
+counts_matrix <- GetAssayData(seurat_subset, layer = "counts")
+cell_metadata <- seurat_subset@meta.data
+gene_metadata <- data.frame(
+  gene_short_name = rownames(seurat_subset),  # ← Explicitly sets gene_short_name
+  row.names = rownames(seurat_subset)
+)
+
+cds_manual <- new_cell_data_set(
+  expression_data = counts_matrix,
+  cell_metadata = cell_metadata,
+  gene_metadata = gene_metadata
+)
+```
+
+## Preprocessing: normalization and dimensionality reduction
+
+```{r step6_preprocess}
+#-----------------------------------------------
+# STEP 6: Preprocess data (normalization and PCA)
+#-----------------------------------------------
+
+# Normalize and reduce dimensions
+cds <- preprocess_cds(
+  cds,
+  num_dim = params$pp.num_dim,       # Number of PCA dimensions (same as Seurat)
+  norm_method = params$pp.norm_method, # Log-normalization (matching Seurat)
+  use_genes = NULL,                  # Use all genes (can specify variable features)
+  scaling = params$pp.scaling,       # Scale genes (mean = 0, variance = 1)
+  verbose = FALSE
+)
+```
+
+## Align to the original Seurat UMAP coordinates
+
+```{r step7_umap_align}
+#-----------------------------------------------
+# STEP 7: Verify/transfer original UMAP coordinates to CDS
+#-----------------------------------------------
+
+# Check if SeuratWrappers already transferred UMAP
+existing_reductions <- names(reducedDims(cds))
+cat("Reductions in CDS after SeuratWrappers conversion:\n")
+print(existing_reductions)
+cat("\n")
+
+# SeuratWrappers should have transferred UMAP, but let's verify and ensure
+# it's named correctly for Monocle 3
+
+# Get the UMAP from Seurat object (our original high-quality UMAP)
+umap_coords <- seurat_subset@reductions[[umap_reduction]]@cell.embeddings
+
+# Verify dimensions match
+cat("UMAP coordinates dimension:", dim(umap_coords), "\n")
+cat("Expected (cells, 2):", c(ncol(cds), 2), "\n\n")
+
+# Add/overwrite UMAP in CDS object
+# Monocle 3 expects reducedDims to be named "UMAP" for visualization
+reducedDims(cds)[["UMAP"]] <- umap_coords
+
+cat("UMAP coordinates set in CDS object\n")
+cat("Available reductions:", names(reducedDims(cds)), "\n")
+```
+
+## Save objects for part 2
+
+```{r step8_save}
+# ADDED: hand-off to part 2
+saveRDS(seurat_subset, file.path(traj.dir, "results/seurat_subset_downsampled.rds"))
+saveRDS(cds, file.path(traj.dir, "results/cds_preprocessed.rds"))
+save(umap_reduction, file = file.path(traj.dir, "results/traj_part1.RData"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut7_trajectory_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut7_trajectory_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

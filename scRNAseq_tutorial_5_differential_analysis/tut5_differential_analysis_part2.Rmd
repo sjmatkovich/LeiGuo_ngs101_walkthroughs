@@ -1,0 +1,270 @@
+---
+title: "ngs101_scRNAseq_walkthrough_5 - Cell-type-specific differential analysis"
+subtitle: "part 2 - cell-level differential expression with FindMarkers"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
+  annotated.rds: "annotations/integrated_annotated_seurat.rds" # tutorial 4 part 3 output, relative to base.dir/annot.subdir
+  diff.subdir: "differential_analysis" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  condition.col: "condition" # metadata column with condition labels
+  condition.ref: "Healthy" # reference condition level
+  condition.test: "Post_Treatment" # test condition level (contrasts are test vs. reference)
+  de.test: "wilcox" # FindMarkers test.use
+  de.logfc_threshold: 0 # FindMarkers logfc.threshold (0 = test all genes passing min.pct)
+  de.min_pct: 0.1 # FindMarkers min.pct
+  de.padj: 0.05 # adjusted p-value cutoff for significance
+  de.lfc: 0.25 # absolute log2 fold-change cutoff for significance
+  volcano.top_n: 10 # number of top significant genes labelled per volcano plot
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/single-cell-rna-seq-beginners-guide-part-5-cell-type-specific-differential-expression-proportion-testing-and-functional-pathway-analysis/>
+
+Part 2 of 4. For each cell type, cells from the test condition are compared with
+cells from the reference condition using `FindMarkers()` (Wilcoxon rank-sum
+test), and the results are shown as volcano plots.
+
+**Caveat (from the source article):** treating every cell as an independent
+replicate (pseudoreplication) inflates significance, since cells from one
+sample are not independent. These cell-level results are best read together
+with the pseudobulk analysis in part 3.
+
+Code is taken from the source article's code blocks. Changes made for this
+notebook series: hard-coded values moved into the YAML front matter, paths built
+from `params` rather than `setwd()`, and the fixes marked `FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# Optional: if the 'presto' package is installed, Seurat uses it automatically
+# to speed up Wilcoxon FindMarkers (see tut5_R_requirements.R)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_5_differential_analysis/tut5_differential_analysis_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+diff.dir <- file.path(base.dir, params$diff.subdir)
+
+# Create output directories
+for (d in c("plots/DE_celllevel", "results")) {
+  if (!dir.exists(file.path(diff.dir, d))) dir.create(file.path(diff.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names and condition levels from params
+celltype.col <- params$celltype.col
+condition.col <- params$condition.col
+cond.ref <- params$condition.ref
+cond.test <- params$condition.test
+```
+
+## Load annotated Seurat object from tutorial 4
+
+```{r step2_load_obj}
+#-----------------------------------------------
+# STEP 2: Load annotated Seurat object from tutorial 4
+#-----------------------------------------------
+
+annotated.file <- file.path(base.dir, params$annot.subdir, params$annotated.rds)
+cat("Reading in annotated Seurat object:", annotated.file, "\n")
+seurat_obj <- readRDS(annotated.file)
+
+stopifnot(all(c(celltype.col, condition.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(all(c(cond.ref, cond.test) %in% seurat_obj@meta.data[[condition.col]]))
+```
+
+## Run FindMarkers for all cell types
+
+```{r step3_findmarkers}
+#-----------------------------------------------
+# STEP 6: Cell-level DE analysis with FindMarkers
+#-----------------------------------------------
+
+# Get unique cell types
+cell_types <- sort(unique(as.character(seurat_obj@meta.data[[celltype.col]])))
+
+# Set default assay and identity for comparison
+DefaultAssay(seurat_obj) <- "RNA"
+Idents(seurat_obj) <- condition.col
+
+# Function to run FindMarkers for one cell type
+run_findmarkers <- function(celltype, seurat_obj) {
+  cat("  Processing:", celltype, "\n")
+
+  # Subset to this cell type
+  cells.ct <- colnames(seurat_obj)[seurat_obj@meta.data[[celltype.col]] == celltype]
+  seurat_obj_sub <- subset(seurat_obj, cells = cells.ct)
+
+  # FIX (guard, not in the article): FindMarkers errors when either condition
+  # has fewer than 3 cells for this cell type
+  n_per_cond <- table(factor(seurat_obj_sub@meta.data[[condition.col]], levels = c(cond.test, cond.ref)))
+  if (any(n_per_cond < 3)) {
+    message("  Skipping ", celltype, ": fewer than 3 cells in a condition (",
+            paste(names(n_per_cond), n_per_cond, collapse = ", "), ")")
+    return(NULL)
+  }
+
+  # Run FindMarkers comparing conditions
+  markers <- FindMarkers(
+    seurat_obj_sub,
+    ident.1 = cond.test,
+    ident.2 = cond.ref,
+    test.use = params$de.test,
+    logfc.threshold = params$de.logfc_threshold,
+    min.pct = params$de.min_pct,
+    verbose = FALSE
+  )
+
+  # Add gene names and cell type
+  markers$gene <- rownames(markers)
+  markers$cell_type <- celltype
+
+  return(markers)
+}
+
+# Run FindMarkers for all cell types
+findmarkers_list <- lapply(cell_types, run_findmarkers, seurat_obj = seurat_obj)
+names(findmarkers_list) <- cell_types
+findmarkers_list <- findmarkers_list[!vapply(findmarkers_list, is.null, logical(1))]
+cell_types_tested <- names(findmarkers_list)
+
+# Combine results
+findmarkers_all <- do.call(rbind, findmarkers_list)
+rownames(findmarkers_all) <- NULL
+
+# Add significance flag
+findmarkers_all$significant <- findmarkers_all$p_val_adj < params$de.padj &
+                               abs(findmarkers_all$avg_log2FC) > params$de.lfc
+
+# Save results
+write.csv(findmarkers_all, file.path(diff.dir, "results/findmarkers_celllevel_results.csv"),
+          row.names = FALSE)
+
+# Summary of significant genes per cell type
+# FIX: the article filters to significant genes before counting, so its
+# total_genes_tested column equals sig_genes; count all genes tested instead
+sig_summary <- findmarkers_all %>%
+  group_by(cell_type) %>%
+  summarise(
+    total_genes_tested = n(),
+    sig_genes = sum(significant),
+    sig_up = sum(significant & avg_log2FC > 0),
+    sig_down = sum(significant & avg_log2FC < 0),
+    .groups = "drop"
+  )
+
+print(as.data.frame(sig_summary), row.names = FALSE)
+write.csv(sig_summary, file.path(diff.dir, "results/findmarkers_celllevel_summary.csv"), row.names = FALSE)
+```
+
+## Visualize cell-level DE results
+
+```{r step4_volcano, fig.width = 8, fig.height = 7}
+#-----------------------------------------------
+# STEP 7: Visualize FindMarkers results
+#-----------------------------------------------
+
+# Volcano plots for each cell type
+for (ct in cell_types_tested) {
+  # Get data for this cell type
+  ct_data <- findmarkers_all %>% filter(cell_type == ct)
+
+  # Identify top genes to label
+  top_genes <- ct_data %>%
+    filter(significant) %>%
+    arrange(p_val_adj) %>%
+    head(params$volcano.top_n)
+
+  # Create volcano plot
+  p_volcano <- ggplot(ct_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+    geom_point(aes(color = significant), alpha = 0.5, size = 1) +
+    scale_color_manual(values = c("FALSE" = "gray", "TRUE" = "red")) +
+    theme_classic(base_size = 12) +
+    labs(title = paste("Volcano Plot:", ct),
+         x = paste0("log2 Fold Change (", cond.test, " vs ", cond.ref, ")"),
+         y = "-log10(FDR)",
+         color = "Significant") +
+    geom_hline(yintercept = -log10(params$de.padj), linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = c(-params$de.lfc, params$de.lfc), linetype = "dashed", color = "blue")
+
+  # Add labels for top genes
+  if (nrow(top_genes) > 0) {
+    p_volcano <- p_volcano +
+      geom_text_repel(data = top_genes, aes(label = gene), size = 3, max.overlaps = 10)
+  }
+  print(p_volcano)
+
+  ggsave(file.path(diff.dir, "plots/DE_celllevel",
+                   paste0("volcano_", gsub("[^A-Za-z0-9]+", "_", ct), ".png")),
+         p_volcano, width = 8, height = 7, dpi = params$plot.dpi)
+}
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut5_differential_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut5_differential_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

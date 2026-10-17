@@ -2,6 +2,9 @@
 title: "ngs101_scRNAseq_walkthrough_3 - Part 2. Compare integration methods and select"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  species: "human" # for QC metrics; options are "human" or "mouse"
 output:
   html_document:
     toc: true
@@ -31,7 +34,7 @@ Primary source:
 library(Seurat)
 library(SeuratObject)
 library(BPCells)
-library(glmGamPoi) # speeds up SCTransform
+# library(glmGamPoi) # speeds up SCTransform
  
 # Integration methods
 library(harmony)
@@ -53,10 +56,30 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
- 
+options(future.globals.maxSize = 10 * 1024^3)  # Increase to 10GB for large datasets - needed during integration steps
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_3_integration/tut3_multi_sample_integration_clustering_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
 # Set working directory
-base.dir <- "~/GSE174609_scRNA"
+base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
 # qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
 # if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
 filt.dir <- file.path(base.dir,"filtered_data")

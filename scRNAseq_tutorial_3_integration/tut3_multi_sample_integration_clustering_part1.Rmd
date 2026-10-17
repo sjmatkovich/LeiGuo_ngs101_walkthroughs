@@ -56,7 +56,7 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
+options(future.globals.maxSize = 10 * 1024^3)  # Increase to 10GB for large datasets - needed during integration steps
 
 if (!exists("params") || !is.list(params)) {
   # Running interactively (e.g. via "Run Cell") rather than through
@@ -468,7 +468,7 @@ merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "f
 merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.mnn", dims = 1:30,
                               reduction.name = "umap.mnn", verbose = FALSE)
  
-cat("FastMNN clustering complete:", length(unique(merged_seurat$fastmnn_clusters)), "clusters\n")
+cat("Post-fastMNN clustering complete:", length(unique(merged_seurat$fastmnn_clusters)), "clusters\n")
 
 cat("Saving current object with integrations to ", file.path(integr.dir,"merged_seurat_with_integrations.rds"), "\n")
 saveRDS(merged_seurat,file.path(integr.dir,"merged_seurat_with_integrations.rds"))

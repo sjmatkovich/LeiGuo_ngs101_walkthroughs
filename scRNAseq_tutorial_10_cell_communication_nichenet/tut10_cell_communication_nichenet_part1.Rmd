@@ -1,0 +1,459 @@
+---
+title: "ngs101_scRNAseq_walkthrough_10 - Cell-cell communication analysis using NicheNet"
+subtitle: "part 1 - prior models, expressed genes, DE gene set, potential ligands, ligand activity, top ligands"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.subdir: "trajectory_analysis" # tutorial 7 (Monocle 3) output subdirectory under base.dir
+  input.rds: "results/seurat_subset_downsampled.rds" # tutorial 7 part 1 output (downsampled annotated object), relative to base.dir/input.subdir
+  nichenet.subdir: "cell_communication_nichenet" # output subdirectory under base.dir for this tutorial
+  model.cache.dir: "" # folder for the downloaded NicheNet prior models; empty = base.dir/nichenet_models
+  zenodo.base: "https://zenodo.org/record/7074291/files/" # Zenodo record holding the human prior models
+  model.files: ["lr_network_human_21122021.rds", "ligand_target_matrix_nsga2r_final.rds", "weighted_networks_nsga2r_final.rds", "ligand_tf_matrix_nsga2r_final.rds"] # file names on Zenodo, in the same order as model.local.names
+  model.local.names: ["lr_network_human.rds", "ligand_target_matrix_human.rds", "weighted_networks_human.rds", "ligand_tf_matrix_human.rds"] # local file names in the cache folder
+  download.timeout: 600 # download timeout in seconds (large files)
+  seed: 42 # random seed
+  assay: "RNA" # assay holding counts / normalized data
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  condition.col: "condition" # metadata column with condition labels
+  receiver: "CD4+ T cells" # receiver cell type
+  sender.celltypes: "" # sender cell types, comma-separated; empty = all cell types other than the receiver (article default)
+  condition.oi: "Post_Treatment" # condition of interest
+  condition.reference: "Healthy" # reference condition
+  expressed.pct: 0.10 # a gene is expressed if detected in at least this fraction of cells of a cell type
+  de.min_pct: 0.10 # FindMarkers min.pct for the receiver DE test
+  de.padj: 0.05 # adjusted p-value cutoff for the gene set of interest
+  de.log2fc: 0.25 # minimum avg_log2FC (upregulated in condition.oi) for the gene set of interest
+  top.n.ligands: 20 # number of top ligands taken from each approach
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-10-cell-cell-communication-analysis-using-nichenet/>
+
+Part 1 of 2. NicheNet asks which ligands, produced by *sender* cells, best
+explain the gene expression changes seen in a *receiver* cell type. It combines
+prior knowledge (a ligand-receptor network, a ligand-target regulatory
+potential matrix and signaling networks) with the expressed genes of the
+data set. Here the receiver is `params$receiver` (CD4+ T cells in the article),
+the gene set of interest is the set of genes upregulated in
+`params$condition.oi` versus `params$condition.reference` in the receiver, and
+the senders are all other cell types.
+
+This notebook: downloads (and caches) the human NicheNet prior models, loads
+the downsampled annotated Seurat object, defines receiver and sender cells,
+finds the expressed genes, defines the DE gene set of interest, defines the
+potential ligands (sender-agnostic and sender-focused) and ranks them by ligand
+activity. It ends by saving the objects needed by part 2 (visualization,
+receptors, sender assignment, optional extended prioritization, signaling paths
+and the circos plot).
+
+**Input:** the downsampled Seurat object written by tutorial 7 part 1
+(`scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part1.Rmd`).
+That notebook must be run first to create `seurat_subset_downsampled.rds`; no
+downsampling is done here.
+
+Code is taken from the source article's code blocks (installation, download and
+steps 1-7; the install block is in `tut10_R_requirements.R`). Changes made for
+this notebook series: hard-coded values moved into the YAML front matter, paths
+built from `params` rather than `setwd()`, and changes marked `ADDED:` or `FIX:`
+in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load Libraries, Prior Models, and Data
+#-----------------------------------------------
+library(nichenetr)
+library(Seurat)
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(igraph)
+library(ggraph)
+library(patchwork)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_10_cell_communication_nichenet/tut10_cell_communication_nichenet_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Working directories
+base.dir <- params$base.dir
+nichenet.dir <- file.path(base.dir, params$nichenet.subdir)
+
+# Create output directories
+# (article: dir.create("plots/nichenet", recursive = TRUE, showWarnings = FALSE))
+for (d in c("plots/nichenet", "results")) {
+  dir.create(file.path(nichenet.dir, d), recursive = TRUE, showWarnings = FALSE)
+}
+
+# Cache folder for the prior models (shared between parts and re-runs)
+model.cache.dir <- if (nzchar(params$model.cache.dir)) path.expand(params$model.cache.dir) else file.path(base.dir, "nichenet_models")
+dir.create(model.cache.dir, recursive = TRUE, showWarnings = FALSE)
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Column names from params
+celltype.col <- params$celltype.col
+condition.col <- params$condition.col
+
+cat("Environment setup complete!\n")
+cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
+cat("nichenetr version:", as.character(packageVersion("nichenetr")), "\n")
+```
+
+## Downloading the NicheNet prior model files
+
+The four prior model files are downloaded once and cached; files already in the
+cache folder are not downloaded again.
+
+```{r download_priors}
+# Recommended: download once and save locally to avoid repeated downloads
+options(timeout = params$download.timeout)  # increase timeout for large files
+
+# ADDED: the four article download.file() calls as one loop over parallel
+# param lists, each guarded by file.exists() and writing into the cache folder.
+# (The article notes the last file, ligand_tf_matrix, is required for the
+# signaling path inference only - Step 13 here, "Step 14" in the article.)
+stopifnot(length(params$model.files) == length(params$model.local.names))
+for (i in seq_along(params$model.files)) {
+  dest <- file.path(model.cache.dir, params$model.local.names[[i]])
+  if (file.exists(dest)) {
+    cat("Already downloaded:", dest, "\n")
+  } else {
+    download.file(
+      url = paste0(params$zenodo.base, params$model.files[[i]]),
+      destfile = dest
+    )
+  }
+}
+```
+
+## Load prior models and data
+
+```{r step1b_load_models_data}
+#-----------------------------------------------
+# STEP 1 (continued): Load prior models and data
+#-----------------------------------------------
+
+# Load NicheNet prior model files (downloaded earlier)
+lr_network           <- readRDS(file.path(model.cache.dir, "lr_network_human.rds"))
+ligand_target_matrix <- readRDS(file.path(model.cache.dir, "ligand_target_matrix_human.rds"))
+weighted_networks    <- readRDS(file.path(model.cache.dir, "weighted_networks_human.rds"))
+
+# Keep only unique ligand-receptor pairs
+lr_network <- lr_network %>% distinct(from, to)
+
+# Load the downsampled annotated Seurat object
+# (ADDED: from tutorial 7 part 1, which must have been run first)
+input.file <- file.path(base.dir, params$input.subdir, params$input.rds)
+stopifnot(file.exists(input.file))
+cat("Reading in Seurat object:", input.file, "\n")
+seurat_obj <- readRDS(input.file)
+
+# ADDED: check the metadata columns, assay and counts layer that are needed
+stopifnot(all(c(celltype.col, condition.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(params$assay %in% names(seurat_obj@assays))
+if (inherits(seurat_obj[[params$assay]], "Assay5") &&
+    !"counts" %in% Layers(seurat_obj[[params$assay]])) {
+  # split layers (counts.1, counts.2, ...) need to be joined for GetAssayData()
+  seurat_obj <- JoinLayers(seurat_obj, assay = params$assay)
+}
+
+# Set cell type labels as the active identity for NicheNet
+# (article: Idents(seurat_obj) <- seurat_obj$final_annotation)
+Idents(seurat_obj) <- seurat_obj[[celltype.col, drop = TRUE]]
+
+# Verify cell types and conditions
+# (ADDED: print() so the tables show in the rendered notebook)
+print(table(seurat_obj[[celltype.col, drop = TRUE]]))
+print(table(seurat_obj[[condition.col, drop = TRUE]]))
+```
+
+## Define receiver and sender cell types
+
+```{r step2_receiver_sender}
+#-----------------------------------------------
+# STEP 2: Define Receiver and Sender Cell Types
+#-----------------------------------------------
+# Define the receiver cell type
+receiver <- params$receiver
+
+# Define senders: all other cell types in the dataset
+# FIX: as.character() - unique(Idents()) is a factor
+all_cell_types <- as.character(unique(Idents(seurat_obj)))
+sender_celltypes <- all_cell_types[all_cell_types != receiver]
+# ADDED: optional explicit sender set (empty = all other cell types, as in the article)
+if (nzchar(params$sender.celltypes)) {
+  sender_celltypes <- trimws(strsplit(params$sender.celltypes, ",")[[1]])
+}
+sender_celltypes  # inspect the list
+
+# Define the condition comparison
+condition_oi        <- params$condition.oi         # condition of interest
+condition_reference <- params$condition.reference  # reference condition
+
+# ADDED: check that receiver, senders and conditions exist in the object
+stopifnot(receiver %in% all_cell_types,
+          all(sender_celltypes %in% all_cell_types),
+          !receiver %in% sender_celltypes,
+          all(c(condition_oi, condition_reference) %in% seurat_obj[[condition.col, drop = TRUE]]))
+```
+
+## Determine expressed genes in receiver and sender cells
+
+```{r step3_expressed_genes}
+#-----------------------------------------------
+# STEP 3: Determine Expressed Genes in Receiver and Sender Cells
+#-----------------------------------------------
+# Extract the count matrix and cell identity vector once for efficiency.
+expr_mat    <- GetAssayData(seurat_obj, assay = params$assay, layer = "counts")
+cell_idents <- Idents(seurat_obj)
+
+# Identify expressed genes in the receiver population
+# A gene is "expressed" if detected in >=10% of receiver cells
+expressed_genes_receiver <- get_expressed_genes(
+  celltype_oi    = receiver,
+  object         = expr_mat,
+  celltype_annot = cell_idents,
+  pct            = params$expressed.pct
+)
+
+# Define background genes: expressed receiver genes present in the NicheNet model
+background_expressed_genes <- expressed_genes_receiver %>%
+  .[. %in% rownames(ligand_target_matrix)]
+
+# Identify expressed genes in each sender cell type (reuse the same matrix/idents)
+list_expressed_genes_sender <- sender_celltypes %>%
+  lapply(function(ct) get_expressed_genes(
+    celltype_oi    = ct,
+    object         = expr_mat,
+    celltype_annot = cell_idents,
+    pct            = params$expressed.pct
+  ))
+
+expressed_genes_sender <- list_expressed_genes_sender %>%
+  unlist() %>%
+  unique()
+
+# ADDED: report the sizes
+cat("Expressed genes in receiver:", length(expressed_genes_receiver), "\n")
+cat("Background genes (also in the ligand-target matrix):", length(background_expressed_genes), "\n")
+cat("Expressed genes in senders (union):", length(expressed_genes_sender), "\n")
+```
+
+## Define the gene set of interest
+
+```{r step4_geneset}
+#-----------------------------------------------
+# STEP 4: Define the Gene Set of Interest
+#-----------------------------------------------
+# Subset to receiver cell type
+seurat_receiver <- subset(seurat_obj, idents = receiver)
+
+# Set condition as identity for DE testing within receiver cells
+Idents(seurat_receiver) <- seurat_receiver[[condition.col, drop = TRUE]]
+
+# Find DE genes: Post_Treatment vs Healthy in CD4+ T cells
+DE_table_receiver <- FindMarkers(
+  object   = seurat_receiver,
+  ident.1  = condition_oi,
+  ident.2  = condition_reference,
+  min.pct  = params$de.min_pct
+)
+
+# Filter to significant, biologically meaningful DE genes
+# and restrict to genes present in the NicheNet ligand-target model
+geneset_oi <- DE_table_receiver %>%
+  filter(p_val_adj <= params$de.padj & avg_log2FC >= params$de.log2fc) %>%  # upregulated in Post_Treatment
+  rownames() %>%
+  intersect(rownames(ligand_target_matrix))
+
+length(geneset_oi)  # how many genes passed filtering? 26 in our case
+
+# ADDED: the ligand activity analysis cannot run on an empty gene set
+stopifnot(length(geneset_oi) > 0)
+write.csv(DE_table_receiver, file.path(nichenet.dir, "results/DE_table_receiver.csv"))
+```
+
+## Define potential ligands
+
+```{r step5_potential_ligands}
+#-----------------------------------------------
+# STEP 5: Define Potential Ligands
+#-----------------------------------------------
+# Identify all receptors expressed by the receiver population
+expressed_receptors <- intersect(
+  lr_network$to,
+  expressed_genes_receiver
+)
+
+# Format of lr_network
+#  from  to    
+#  A2M   MMP2  
+#  A2M   MMP9  
+#  A2M   LRP1  
+#  A2M   KLK3  
+#  AANAT MTNR1A
+#  AANAT MTNR1B
+
+# --- Sender-agnostic approach ---
+# Potential ligands: any ligand in the network with an expressed receptor in receiver.
+all_genes_detected <- rownames(seurat_obj)
+
+potential_ligands_agnostic <- lr_network %>%
+  filter(to %in% expressed_receptors) %>%
+  pull(from) %>%
+  unique() %>%
+  intersect(all_genes_detected)  # keep only ligands present in the assay
+
+# --- Sender-focused approach ---
+expressed_ligands_sender <- intersect(
+  lr_network$from,
+  expressed_genes_sender
+)
+
+# Potential ligands: expressed in sender AND have expressed receptor in receiver
+potential_ligands_focused <- lr_network %>%
+  filter(from %in% expressed_ligands_sender & to %in% expressed_receptors) %>%
+  pull(from) %>%
+  unique()
+
+# ADDED: report the sizes
+cat("Expressed receptors in receiver:", length(expressed_receptors), "\n")
+cat("Potential ligands (sender-agnostic):", length(potential_ligands_agnostic), "\n")
+cat("Potential ligands (sender-focused):", length(potential_ligands_focused), "\n")
+```
+
+## Run ligand activity analysis
+
+```{r step6_ligand_activity}
+#-----------------------------------------------
+# STEP 6: Run Ligand Activity Analysis
+#-----------------------------------------------
+# Run ligand activity analysis — sender-agnostic
+ligand_activities_agnostic <- predict_ligand_activities(
+  geneset                  = geneset_oi,
+  background_expressed_genes = background_expressed_genes,
+  ligand_target_matrix     = ligand_target_matrix,
+  potential_ligands        = potential_ligands_agnostic
+)
+
+# Run ligand activity analysis — sender-focused
+ligand_activities_focused <- predict_ligand_activities(
+  geneset                  = geneset_oi,
+  background_expressed_genes = background_expressed_genes,
+  ligand_target_matrix     = ligand_target_matrix,
+  potential_ligands        = potential_ligands_focused
+)
+
+# Sort by corrected AUPR and assign rank using row_number() on the sorted result.
+ligand_activities_agnostic <- ligand_activities_agnostic %>%
+  arrange(desc(aupr_corrected)) %>%
+  mutate(rank = row_number())
+
+ligand_activities_focused <- ligand_activities_focused %>%
+  arrange(desc(aupr_corrected)) %>%
+  mutate(rank = row_number())
+
+# ADDED: show the top of each table and save them
+print(head(ligand_activities_agnostic, 10))
+print(head(ligand_activities_focused, 10))
+write.csv(ligand_activities_agnostic, file.path(nichenet.dir, "results/ligand_activities_agnostic.csv"), row.names = FALSE)
+write.csv(ligand_activities_focused, file.path(nichenet.dir, "results/ligand_activities_focused.csv"), row.names = FALSE)
+```
+
+## Select top ligands for downstream analysis
+
+```{r step7_top_ligands}
+#-----------------------------------------------
+# STEP 7: Select Top Ligands for Downstream Analysis
+#-----------------------------------------------
+# Select top 20 ligands from each approach
+top_n <- params$top.n.ligands
+
+best_upstream_ligands_agnostic <- ligand_activities_agnostic %>%
+  top_n(top_n, aupr_corrected) %>%
+  pull(test_ligand) %>%
+  unique()
+
+best_upstream_ligands_focused <- ligand_activities_focused %>%
+  top_n(top_n, aupr_corrected) %>%
+  pull(test_ligand) %>%
+  unique()
+
+# Combine (union of both approaches for comprehensive follow-up)
+best_upstream_ligands <- union(
+  best_upstream_ligands_agnostic,
+  best_upstream_ligands_focused
+)
+
+cat("Top ligands (agnostic):", paste(best_upstream_ligands_agnostic, collapse = ", "), "\n")
+cat("Top ligands (focused): ", paste(best_upstream_ligands_focused, collapse = ", "), "\n")
+cat("Union:", length(best_upstream_ligands), "ligands\n")
+```
+
+## Save objects for part 2
+
+```{r step7_save}
+# ADDED: hand-off to part 2 (the prior models are reloaded from the cache folder;
+# lr_network here is the de-duplicated version from Step 1)
+saveRDS(seurat_obj, file.path(nichenet.dir, "results/seurat_nichenet_input.rds"))
+save(receiver, sender_celltypes, condition_oi, condition_reference, top_n,
+     expressed_genes_receiver, background_expressed_genes, expressed_genes_sender,
+     geneset_oi, expressed_receptors, lr_network,
+     potential_ligands_agnostic, potential_ligands_focused,
+     ligand_activities_agnostic, ligand_activities_focused,
+     best_upstream_ligands_agnostic, best_upstream_ligands_focused,
+     best_upstream_ligands,
+     file = file.path(nichenet.dir, "results/nichenet_part1_state.RData"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut10_nichenet_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut10_nichenet_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

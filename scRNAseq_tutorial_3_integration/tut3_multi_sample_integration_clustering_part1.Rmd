@@ -379,13 +379,13 @@ merged_integrations <- IntegrateLayers(
   new.reduction = "integrated.cca",
   normalization.method = "LogNormalize", # standard nfs. Alternative is "SCT"
   dims = 1:30,
-  verbose = FALSE
+  verbose = TRUE
 )
  
 merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.cca", dims = 1:30, 
                           reduction.name = "umap.cca", verbose = FALSE)
  
-cat("CCA integration complete:", length(unique(merged_integrations$cca_clusters)), "clusters\n")
+cat("CCA integration complete\n")
 
 cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
 saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
@@ -404,13 +404,13 @@ merged_integrations <- IntegrateLayers(
   new.reduction = "integrated.rpca",
   normalization.method = "LogNormalize", # standard nfs. Alternative is "SCT"
   dims = 1:30,
-  verbose = FALSE
+  verbose = TRUE
 )
 
 merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.rpca", dims = 1:30,
                            reduction.name = "umap.rpca", verbose = FALSE)
  
-cat("RPCA integration complete:", length(unique(merged_integrations$rpca_clusters)), "clusters\n")
+cat("RPCA integration complete\n")
 
 cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
 saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
@@ -431,7 +431,7 @@ merged_integrations <- RunHarmony(merged_integrations,
 merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.harmony", dims = 1:30,
                                 reduction.name = "umap.harmony", verbose = FALSE)
  
-cat("Harmony integration complete:", length(unique(merged_integrations$harmony_clusters)), "clusters\n")
+cat("Harmony integration complete\n")
 
 cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
 saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
@@ -450,15 +450,13 @@ merged_integrations <- IntegrateLayers(
   method = FastMNNIntegration,
   orig.reduction = "pca",
   new.reduction = "integrated.mnn",
-  verbose = FALSE
+  verbose = TRUE
 )
  
-cat("FastMNN integration complete\n")
-
 merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.mnn", dims = 1:30,
                               reduction.name = "umap.mnn", verbose = FALSE)
- 
-cat("Post-fastMNN clustering complete:", length(unique(merged_integrations$fastmnn_clusters)), "clusters\n")
+
+cat("FastMNN integration complete\n")
 
 cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
 saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))

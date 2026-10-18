@@ -262,7 +262,11 @@ saveRDS(merged_naive,file.path(integr.dir,"merged_naive.rds"))
 
 Note that a prespecified cluster resolution was defined in the above code. Outside of this tutorial, it is recommended to evaluate multiple resolutions for apparent 'batch effects' in the naive merge before proceeding to integration methods.
 
+**For further development**: define sample colors and condition colors via YAML frontmatter params and in a more generalizable way, e.g. using `RColorBrewer` palettes or `viridis` palettes.
+
 ```{r naive_merge_basic_cluster_viz, fig.width = 16, fig.height = 12}
+
+sample_ids <- unique(merged_naive@meta.data$sample_id)
 
 # Define color palettes for visualization
 # 8 samples need 8 distinct, visible colors
@@ -270,7 +274,7 @@ sample_colors <- c(
   "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",  # Healthy 1-4: Red, Blue, Green, Purple
   "#FF7F00", "#A65628", "#F781BF", "#999999"   # Post_Patient 1-4: Orange, Brown, Pink, Gray
 )
-names(sample_colors) <- sample_metadata$sample_id
+names(sample_colors) <- sample_ids
  
 # 2 conditions need 2 distinct colors
 condition_colors <- c(

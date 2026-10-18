@@ -5,6 +5,10 @@ date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
   species: "human" # for QC metrics; options are "human" or "mouse"
+  biosample_id: "sample_id" # column name in metadata that contains unique sample identifiers, used for plotting
+  condition_id: "condition" # column name in metadata that contains condition identifiers, used for plotting
+  max_cells_for_silhouette: 5000 # to keep computation of pairwise distances reasonable
+  min_cluster_percent: 0.01 # minimum cluster size as a fraction of total cells (e.g., 0.01 = 1%) used for warning
 output:
   html_document:
     toc: true
@@ -105,6 +109,9 @@ dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 merged_naive.file <- "merged_naive.rds"
 merged_integration.file <- "merged_chosen_integration.rds"
 
+# Output name for final integrated and clustered Seurat object
+merged_output.file <- "merged_integrated_clustered.rds"
+
 # Set random seed for reproducibility
 set.seed(27)
 
@@ -126,15 +133,21 @@ merged_integrated <- readRDS(file.path(integr.dir,merged_integration.file))
 load(file.path(integr.dir,"metadata","chosen_methods.RData"))
 ```
 
-## 2026-10-18: NEED TO IMPLEMENT FindNeighbors (not run in Part 2) and then FindClusters at multiple resolution
+### Make neighborhood graphs for chosen, integrated reduction
 
-Examine the way the _nn and _snn graphs are stored in the Seurat object. The FindNeighbors function will create a new _nn and _snn graph for the chosen reduction (e.g. integrated.rpca, integrated.harmony, integrated.mnn) and store it in the object.
+This will over-write the existing _nn and _snn graphs in the object, which were created for the naive merge in Part 1.
 
-Considering that the FindNeighbors function was not run in Part 2, we will need to run it now for the chosen reduction before running FindClusters and **I will need to ensure that it chooses the integrated.xxx reduction** rather than the default PCA reduction also stored in the object at this point, unless naive merge was chosen as the 'integration' option.
+```{r find_neighbors}
+integrated_reduction <- grep("^integrated\\.", Reductions(merged_integrated), value = TRUE)
+if (length(integrated_reduction) == 0) {
+  stop("No integrated reduction found in the Seurat object. Please check the integration step.")
+} else if (length(integrated_reduction) > 1) {
+  warning("Multiple integrated reductions found. Using the first one: ", integrated_reduction[1])
+  integrated_reduction <- integrated_reduction[1]
+}
 
-**Also take care** since a FindNeighbors and FindClusters were run in Part 1 for the naive merge, and those _nn and _snn graphs are still stored in the object. The new FindNeighbors will create a new _nn and _snn graph for the chosen reduction but how are these named?
-
-Then FindClusters can be run at multiple resolutions **(on the appropriate _snn graph)** to evaluate cluster granularity.
+merged_integrated <- FindNeighbors(merged_integrated, reduction = integrated_reduction, verbose = TRUE)
+```
 
 ## Examine clustering at multiple resolutions
 
@@ -142,14 +155,11 @@ If using `SCT` assay rather than `RNA`, change `_snn_res` label in cluster calcu
 
 ```{r multiple_resolution_clusters, fig.width = 14, fig.height = 14}
 
-#-----------------------------------------------
-# STEP 15: Perform clustering at multiple resolutions
-#-----------------------------------------------
- 
 # Test multiple resolutions
 resolutions <- c(0.4, 0.6, 0.8, 1.0, 1.2)
  
 for (res in resolutions) {
+  cat("\nFinding clusters at resolution", res, "\n")
   merged_integrated <- FindClusters(
     merged_integrated,
     resolution = res,
@@ -164,10 +174,6 @@ for (res in resolutions) {
 colnames(merged_integrated@meta.data) <- gsub("RNA_snn_res\\.", "clusters_res_", 
                                               colnames(merged_integrated@meta.data))
 
-#-----------------------------------------------
-# STEP 16: Visualize clustering results across resolutions
-#-----------------------------------------------
- 
 # Create UMAP plots for each resolution
 plot_list <- lapply(resolutions, function(res) {
   cluster_col <- paste0("clusters_res_", res)
@@ -191,39 +197,27 @@ ggsave(file.path(integr.dir,"plots/clustering/06_multi_resolution_clustering.png
 
 ## Silhouette scores
 
-The Silhouette Score for a data point is calculated as (b - a) / max(a, b), where a is the average distance to points in its own cluster and b is the average distance to points in the nearest neighboring cluster. (Copilot)
+The *silhouette score* for a data point is calculated as (b - a) / max(a, b), where a is the average distance to points in its own cluster and b is the average distance to points in the nearest neighboring cluster. (Copilot)
 
 ```{r silhouette_scores}
-#-----------------------------------------------
-# STEP 17: Evaluate optimal clustering resolution
-#-----------------------------------------------
 
 # Silhouette score measures how similar cells are to their own cluster vs other clusters
 # Values range from -1 to 1 (higher is better)
 
-# Map UMAP reduction name to corresponding integrated reduction name
-# We use integrated space (not UMAP) for silhouette calculation because:
+# Use integrated space (not UMAP) for silhouette calculation because:
 # - Integrated space preserves more information (30+ dimensions vs UMAP's 2)
 # - Silhouette scores are more meaningful in the space where clustering was performed
-# integrated_reduction <- switch(reduction_final,
-#   "umap.cca" = "integrated.cca",
-#   "umap.rpca" = "integrated.rpca",
-#   "umap.harmony" = "harmony",
-#   "umap.mnn" = "integrated.mnn",
-#   "umap" = "pca"  # Fallback for naive merge
-# )
+
+cat("\nEvaluating clustering resolutions using", integrated_reduction, "space\n")
  
-cat("\nEvaluating clustering resolutions using", chosen_reduction, "space\n")
- 
-# For large datasets (>10,000 cells), subsample for silhouette calculation (use 5000 cells in our case)
+# For large datasets (>10,000 cells), subsample for silhouette calculation (use 5000 cells or definition in params)
 # Computing distance matrices for all cells is computationally prohibitive
 n_cells <- ncol(merged_integrated)
-max_cells_for_silhouette <- 5000
  
-if (n_cells > max_cells_for_silhouette) {
-  cat("Dataset has", n_cells, "cells - subsampling", max_cells_for_silhouette, "cells for silhouette calculation in existing clusters\n")
+if (n_cells > params$max_cells_for_silhouette) {
+  cat("Dataset has", n_cells, "cells - subsampling", params$max_cells_for_silhouette, "cells for silhouette calculation in existing clusters\n")
   set.seed(42)
-  subsample_idx <- sample(1:n_cells, max_cells_for_silhouette)
+  subsample_idx <- sample(1:n_cells, params$max_cells_for_silhouette)
 } else {
   subsample_idx <- 1:n_cells
 }
@@ -235,7 +229,7 @@ silhouette_scores <- sapply(resolutions, function(res) {
   clusters <- as.numeric(merged_integrated@meta.data[[cluster_col]][subsample_idx])
  
   # Get integrated coordinates for subsampled cells (use first 30 dimensions)
-  coords <- Embeddings(merged_integrated, reduction = chosen_reduction)[subsample_idx, ]
+  coords <- Embeddings(merged_integrated, reduction = integrated_reduction)[subsample_idx, ]
   coords <- coords[, 1:min(30, ncol(coords))]
  
   # Calculate silhouette (only if we have at least 2 clusters)
@@ -268,8 +262,7 @@ optimal_resolution <- resolution_comparison$resolution[optimal_idx]
  
 cat("\nRecommended resolution:", optimal_resolution, 
     "(", resolution_comparison$n_clusters[optimal_idx], "clusters )\n")
- 
-# Recommended resolution: 0.4 ( 17 clusters )
+
 ```
 
 ### Set clusters at the chosen resolution as the default for the object
@@ -285,17 +278,14 @@ Idents(merged_integrated) <- "seurat_clusters"
 ## Cluster quality assessment
 
 ```{r cluster_quality_assessment, fig.width = 12, fig.height = 6}
-#-----------------------------------------------
-# STEP 18: Assess cluster quality and stability
-#-----------------------------------------------
- 
+
 # Check cluster sizes
 cluster_sizes <- table(merged_integrated$seurat_clusters)
 cat("\nCluster sizes:\n")
 print(cluster_sizes)
  
 # Identify very small clusters (<1% of cells)
-min_cluster_size <- 0.01 * ncol(merged_integrated)
+min_cluster_size <- params$min_cluster_percent * ncol(merged_integrated)
 small_clusters <- which(cluster_sizes < min_cluster_size)
  
 if (length(small_clusters) > 0) {
@@ -365,17 +355,16 @@ ggsave(file.path(integr.dir,"plots/clustering/09_condition_distribution_clusters
 ## Final integrated and clustered visualization
 
 ```{r summary_plots, fig.width = 16, fig.height = 12}
-#-----------------------------------------------
-# STEP 19: Create comprehensive visualization of final results
-#-----------------------------------------------
- 
+
+sample_ids <- unique(merged_integrated@meta.data[[params$biosample_id]])
+
 # Define color palettes for visualization
 # 8 samples need 8 distinct, visible colors
 sample_colors <- c(
   "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",  # Healthy 1-4: Red, Blue, Green, Purple
   "#FF7F00", "#A65628", "#F781BF", "#999999"   # Post_Patient 1-4: Orange, Brown, Pink, Gray
 )
-names(sample_colors) <- unique(merged_integrated@meta.data$sample_ids)
+names(sample_colors) <- sample_ids
  
 # 2 conditions need 2 distinct colors
 condition_colors <- c(
@@ -397,7 +386,7 @@ p_final_clusters <- DimPlot(merged_integrated,
 p_by_condition <- DimPlot(merged_integrated,
                           reduction = chosen_reduction,
                           group.by = "seurat_clusters",
-                          split.by = "condition",
+                          split.by = params$condition_id,
                           label = TRUE,
                           label.size = 4,
                           pt.size = 0.05,
@@ -408,7 +397,7 @@ p_by_condition <- DimPlot(merged_integrated,
 # Colored by sample (integration quality check)
 p_by_sample <- DimPlot(merged_integrated,
                        reduction = chosen_reduction,
-                       group.by = "sample_id",
+                       group.by = params$biosample_id,
                        pt.size = 0.05,
                        cols = sample_colors) +
   ggtitle("Sample Mixing (Integration Quality)") +
@@ -417,7 +406,7 @@ p_by_sample <- DimPlot(merged_integrated,
 # Colored by condition
 p_by_condition_single <- DimPlot(merged_integrated,
                                  reduction = chosen_reduction,
-                                 group.by = "condition",
+                                 group.by = params$condition_id,
                                  pt.size = 0.05,
                                  cols = condition_colors) +
   ggtitle("Treatment Conditions")
@@ -440,10 +429,7 @@ ggsave(file.path(integr.dir,"plots/clustering/11_clusters_by_condition_split.png
 Ensure `mixing_results` data frame from earlier .Rmd was retrieved at earlier `load(file.path(integr.dir,"metadata","chosen_methods.RData"))` step.
 
 ```{r summary_output}
-#-----------------------------------------------
-# STEP 20: Save integrated and clustered data
-#-----------------------------------------------
- 
+
 cat("\n=== Saving Final Results ===\n")
  
 # Join layers for downstream analysis (or delay until future .Rmd module)
@@ -451,7 +437,7 @@ cat("\n=== Saving Final Results ===\n")
  
 # Save the final integrated object
 saveRDS(merged_integrated,
-        file.path(integr.dir,"seurat_integrated_clustered.rds")
+        file.path(integr.dir,merged_output.file)
 )
  
 # Save metadata
@@ -459,10 +445,11 @@ write.csv(merged_integrated@meta.data,
           file.path(integr.dir,"metadata/integrated_cell_metadata.csv"),
           row.names = TRUE)
  
-# Create comprehensive summary
+## Create comprehensive summary
+# note that selecting sample designation with [[params$biosample_id]] gives a list object
 integration_summary <- data.frame(
   dataset = "GSE174609",
-  n_samples = length(unique(merged_integrated$sample_id)),
+  n_samples = length(unlist(unique(merged_integrated[[params$biosample_id]]))),
   n_cells_total = ncol(merged_integrated),
   n_genes = nrow(merged_integrated),
   integration_method = chosen_method,

@@ -19,9 +19,13 @@ editor_options:
     wrap: 80
 ---
 
+## Setup
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+Params ingest
 
 ```{r ingest_params_if_necessary}
 if (!exists("params") || !is.list(params)) {

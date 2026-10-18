@@ -20,8 +20,34 @@ editor_options:
     wrap: 80
 ---
 
+## Setup
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+```
+
+Params ingest
+
+```{r ingest_params_if_necessary}
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_3_integration/tut3_multi_sample_integration_clustering_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
 ```
 
 ## Description
@@ -61,26 +87,6 @@ library(reshape2)         # Data reshaping for visualization
 # Parallel processing
 library(future)
 options(future.globals.maxSize = 10 * 1024^3)  # Increase to 10GB for large datasets - needed during integration steps
-
-if (!exists("params") || !is.list(params)) {
-  # Running interactively (e.g. via "Run Cell") rather than through
-  # knit/render, so `params` was never created by rmarkdown::render().
-  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
-  # defaults live in exactly one place (the YAML block above) instead of
-  # being duplicated here.
-  rmd_path <- tryCatch(
-    # Only reliable when this document is the active editor tab; if focus
-    # has moved to another file, this will pick up the wrong path.
-    rstudioapi::getSourceEditorContext()$path,
-    error = function(e) NA_character_
-  )
-  if (is.na(rmd_path) || !nzchar(rmd_path)) {
-    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
-    # the working directory is the project root.
-    rmd_path <- "scRNAseq_tutorial_3_integration/tut3_multi_sample_integration_clustering_part2.Rmd"
-  }
-  params <- rmarkdown::yaml_front_matter(rmd_path)$params
-}
 
 # Set working directory
 base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
@@ -136,9 +142,11 @@ merged_integrations <- readRDS(file.path(integr.dir,merged_integrations.file))
 
 Clusters were defined in Part 1 using the `merged_integrations` object, which contains all integration methods, but have not yet been optimized for silhouette scores or cluster stability. The UMAPs below are only colored by sample (assesses mixing) and by condition (assesses biological preservation).
 
+**For further development**: define sample colors and condition colors via YAML frontmatter params and in a more generalizable way, e.g. using `RColorBrewer` palettes or `viridis` palettes.
+
 ```{r umap_comparison, fig.width = 16, fig.height = 12}
 
-sample_ids <- unique(merged_integrations@meta.data$sample_id)
+sample_ids <- unique(merged_integrations@meta.data[[params$biosample_id]])
 
 # Define color palettes for visualization
 # 8 samples need 8 distinct, visible colors
@@ -308,10 +316,7 @@ methods_list <- list(
 mixing_results <- data.frame(
   method = names(methods_list),
   mixing_score = sapply(methods_list, function(x) {
-    calculate_mixing_metric(x$obj, group_by = "sample_id", reduction = x$reduction)
-  }),
-  n_clusters = sapply(methods_list, function(x) {
-    length(unique(x$obj$seurat_clusters))
+    calculate_mixing_metric(x$obj, group_by = params$biosample_id, reduction = x$reduction)
   })
 )
  
@@ -328,7 +333,7 @@ p_mixing <- ggplot(mixing_results, aes(x = reorder(method, -mixing_score), y = m
   geom_bar(stat = "identity") +
   geom_text(aes(label = round(mixing_score, 2)), vjust = -0.5) +
   labs(title = "Integration Method Comparison: Sample Mixing",
-       subtitle = "Higher score = better integration (samples mix within cell types)",
+       subtitle = "Higher score = better integration (samples mix within cell neighborhoods)",
        x = "Integration Method",
        y = "Mixing Score (Local Inverse Simpson's Index)") +
   theme(legend.position = "none") +
@@ -345,7 +350,7 @@ Find condition centers: Calculate the average UMAP position for all Healthy cell
 
 Measure separation: Calculate the distance between these two centers
 
-Interpret the distance:
+Interpret the distance (with caveats regarding meaning of distances in UMAP space):
 
 High distance = Conditions are well-separated (biological signal preserved) âœ“
 
@@ -357,7 +362,7 @@ Low distance = Conditions overlap (might have over-integrated, losing biology) â
 # Uses UMAP distances between conditions
 assess_condition_separation <- function(seurat_obj, reduction) {
   umap_coords <- seurat_obj[[reduction]]@cell.embeddings[, 1:2]
-  conditions <- seurat_obj$condition
+  conditions <- seurat_obj[[params$condition_id]][,1] # need to extract the first column of the resulting data frame
  
   # Calculate mean UMAP position for each condition
   condition_centers <- aggregate(umap_coords, by = list(conditions), FUN = mean)
@@ -381,7 +386,7 @@ mixing_results$condition_separation <- separation_results$condition_separation
  
 cat("\nBiological Signal Preservation:\n")
 cat("(Higher separation = conditions remain distinguishable)\n\n")
-print(mixing_results[, c("method", "mixing_score", "condition_separation", "n_clusters")])
+print(mixing_results[, c("method", "mixing_score", "condition_separation")])
 ```
 
 ### Plot tradeoff
@@ -656,13 +661,12 @@ if (params$subsetted_integrations) {
   }
 
   # Save out object with only preserved reductions
-  cat("Saving previous full integrations object with only chosen integration", chosen_method, "\n")
+  cat("Saving previous full integrations object with only chosen integration:", chosen_method, "\n")
   saveRDS(
     merged_integrations,
     file.path(integr.dir, "merged_chosen_integration.rds")
   )
 }
-
 ```
 
 ## R sessionInfo

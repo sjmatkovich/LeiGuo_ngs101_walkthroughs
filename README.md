@@ -8,7 +8,7 @@ While 'ngs101' may seem like a name for a beginner's site, there are also more a
 
 I have found the workflows suggested by these tutorials to be helpful, and have prepared R markdown notebooks to encapsulate the code presented at the above website.
 
-I have rendered parts of the presented code to be more modular, including extracting configurable parameters into YAML frontmatter. This should facilitate later incorporation into a production environment.
+I have refactored parts of the presented code to be more modular, including extracting configurable parameters into YAML frontmatter. This should facilitate later incorporation into a production environment.
 
 ---
 
@@ -21,7 +21,7 @@ Ideally, you will have set up or will be using the same version of Ubuntu and wi
 From a bash terminal, run:
 
 ```
-cd ~/github # or wherever the rpo should be stored
+cd ~/github # or wherever the repo should be stored
 git clone https://github.com/sjmatkovich/LeiGuo_ngs101_walkthroughs.git
 ```
 

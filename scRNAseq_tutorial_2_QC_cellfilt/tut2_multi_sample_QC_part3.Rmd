@@ -62,7 +62,7 @@ if (!exists("params") || !is.list(params)) {
   if (is.na(rmd_path) || !nzchar(rmd_path)) {
     # Fallback if rstudioapi is unavailable or no doc is focused; assumes
     # the working directory is the project root.
-    rmd_path <- "scRNAseq_tutorial_2_QC_cellfilt/tut2_multi_sample_QC_part2.Rmd"
+    rmd_path <- "scRNAseq_tutorial_2_QC_cellfilt/tut2_multi_sample_QC_part3.Rmd"
   }
   params <- rmarkdown::yaml_front_matter(rmd_path)$params
 }
@@ -137,13 +137,12 @@ for (n in seq_along(sample_names)) {
   counts_matrix <- LayerData(seurat_obj, layer = "counts")
   gene_detection <- rowSums(counts_matrix > 0)
   
-  # FIX THIS SECTION TO PERFORM grepl WITH PATTERNS DEFINED ABOVE FOR SPECIES
   gene_qc_list[[n]] <- data.frame(
     gene = rownames(seurat_obj),
     n_cells_detected = gene_detection,
     pct_cells_detected = (gene_detection / ncol(seurat_obj)) * 100,
     is_mt = grepl(mt_pattern, rownames(seurat_obj)),
-    is_ribo = grepl(ribo_pattern rownames(seurat_obj)),
+    is_ribo = grepl(ribo_pattern, rownames(seurat_obj)),
     is_hb = grepl(hb_pattern, rownames(seurat_obj))
   )
   names(gene_qc_list)[n] <- sample_names[n]

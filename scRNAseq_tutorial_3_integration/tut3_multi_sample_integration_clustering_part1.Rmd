@@ -2,6 +2,12 @@
 title: "ngs101_scRNAseq_walkthrough_3 - Part 1. Merge and prepare integration"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  species: "human" # for QC metrics; options are "human" or "mouse"
+  subsetted_integrations: FALSE # subset object prior to integration analyses?
+  subset_cell_frac: 0.20 # fraction to use for subsetting
+  harmony_covariates: "sample_id" # covariate(s) for which harmony will remove effect on data
 output:
   html_document:
     toc: true
@@ -13,8 +19,34 @@ editor_options:
     wrap: 80
 ---
 
+## Setup
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+```
+
+Params ingest
+
+```{r ingest_params_if_necessary}
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_3_integration/tut3_multi_sample_integration_clustering_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
 ```
 
 ## Description
@@ -31,11 +63,11 @@ Primary source:
 library(Seurat)
 library(SeuratObject)
 library(BPCells)
-library(glmGamPoi) # speeds up SCTransform
+# library(glmGamPoi) # speeds up SCTransform
  
 # Integration methods
 library(harmony)
-library(batchelor)
+library(batchelor) # FastMNN
 library(SeuratWrappers)
  
 # Visualization and data manipulation
@@ -53,10 +85,10 @@ library(reshape2)         # Data reshaping for visualization
  
 # Parallel processing
 library(future)
-options(future.globals.maxSize = 40 * 1024^3)  # Increase to 40GB for large datasets - needed during integration steps
- 
+options(future.globals.maxSize = 10 * 1024^3)  # Increase to 10GB for large datasets - needed during integration steps
+
 # Set working directory
-base.dir <- "~/GSE174609_scRNA"
+base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
 # qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
 # if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
 filt.dir <- file.path(base.dir,"filtered_data")
@@ -67,7 +99,6 @@ integr.dir <- file.path(base.dir, "integration_analysis")
 dir.create(file.path(integr.dir,"plots"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/integration_comparison"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"plots/clustering"), showWarnings = FALSE)
-dir.create(file.path(integr.dir,"integrated_data"), showWarnings = FALSE)
 dir.create(file.path(integr.dir,"metadata"), showWarnings = FALSE)
 
 # Set random seed for reproducibility
@@ -150,19 +181,12 @@ cat("\nTotal cells across all samples:",
 
 ## Naive merge without integration, with basic cluster determination
 
-Use `SCTransform` here by default rather than the standard Seurat normalization workflow for basic clustering.
+For snRNAseq, consider calculating MALAT1 ratios for each separate sample object in the earlier QC process, and then using MALAT1 ratios as an additional parameter in ScaleData or SCTransform `vars.to.regress`
 
-For snRNAseq, consider calculating MALAT1 ratios for each separate sample object in the earlier QC process, and then using MALAT1 ratios as an additional parameter in SCTransform `vars.to.regress`
-
-The `glmGamPoi` package substantially improves speed and is used by default if installed.
-
-**After the merge**: this is the place to convert the object to on-disk via `BPCells` and thus facilitate further operations. The benefit of on-disk storage is apparent with the standard Seurat normalization workflow, but `SCTransform` requires all data in memory (at least for Seurat 5.4; https://github.com/satijalab/sctransform/issues/207)
+**After the merge**: this is the place to convert the object to on-disk via `BPCells` and thus facilitate further operations. The benefit of on-disk storage is apparent with the standard Seurat normalization workflow, but `SCTransform` would require all data in memory (at least for Seurat 5.4; https://github.com/satijalab/sctransform/issues/207)
 
 ```{r naive_merge}
-#-----------------------------------------------
-# STEP 3: Naive merge without integration
-#-----------------------------------------------
- 
+
 # Merge all samples
 merged_naive <- merge(
   x = seurat_list[[1]],
@@ -172,7 +196,6 @@ merged_naive <- merge(
 )
  
 cat("Merged dataset:", ncol(merged_naive), "cells ×", nrow(merged_naive), "genes\n")
-# Merged dataset: 72649 cells × 18861 genes
 ```
 
 ### Check whether layers are already split
@@ -191,26 +214,39 @@ if (length(current_layers) > 1) {
 
 ### Write layers out with BPCells and normalize
 
-```{r layers_normalization}
+The individual count (integer) layers are exported with `BPCells` for reduced memory demands in future steps.
+
+Normalization and scaling may have been performed previously for individual Seurat objects included in the merge. However, the objects were subset to common genes in a preceding step in this notebook, making it worthwhile to re-do normalization.
+
+```{r layers_bpcells_normalization}
 for (layer in Layers(merged_naive, search = "counts")) {
-  mat <- LayerData(merged_naive, layer = layer)
-  path <- file.path(integr.dir,"bpcells_naive_merge", layer)
+  counts <- LayerData(merged_naive, layer = layer)
+  # Optional sanity check that the values really are non-negative integers
+  stopifnot(all(counts@x == round(counts@x)), min(counts@x) >= 0)
+
+  # converts dgCMatrix to IterableMatrix, then to uint32_t for BPCells. Needed because zero values are stored as doubles in dgCMatrix and trigger BPCells warning of non-intergers
+  mat <- as(counts, "IterableMatrix")
+  mat <- convert_matrix_type(mat, type = "uint32_t")
+  path <- file.path(integr.dir,"bpcells", layer)
   write_matrix_dir(mat, path)
   LayerData(merged_naive, layer = layer) <- open_matrix_dir(path)
 }
 
-## (Standard workflow commands are commented out)
-# merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
-# merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
-# merged_naive <- ScaleData(merged_naive, verbose = FALSE)
+## Standard nfs (Normalize, FindVariableFeatures, Scale) workflow
+merged_naive <- NormalizeData(merged_naive, verbose = FALSE)
+merged_naive <- FindVariableFeatures(merged_naive, nfeatures = 2000, verbose = FALSE)
+# There are many parameters worth investigating for ScaleData
+# different model types (linear, negbinom);
+# scale all genes, not just HVG; etc.
+merged_naive <- ScaleData(merged_naive, vars.to.regress = c("percent.mt"), verbose = FALSE)
 
 ## SCTransform
-merged_naive <- SCTransform(merged_naive,
-  vars.to.regress = c("percent.mt"),
-  return.only.var.genes = TRUE,
-  verbose = TRUE,
-  conserve.memory = TRUE
-)
+# merged_naive <- SCTransform(merged_naive,
+#   vars.to.regress = c("percent.mt"),
+#   return.only.var.genes = TRUE,
+#   verbose = TRUE,
+#   conserve.memory = TRUE
+# )
 
 merged_naive <- RunPCA(merged_naive, npcs = 50, verbose = FALSE)
 merged_naive <- RunUMAP(merged_naive, dims = 1:30, reduction = "pca", verbose = FALSE)
@@ -219,24 +255,26 @@ merged_naive <- FindClusters(merged_naive, resolution = 0.6, verbose = FALSE)
  
 cat("Clustering complete:", length(unique(merged_naive$seurat_clusters)), "clusters identified with default parameters\n")
 
-saveRDS(merged_naive,file.path(integr.dir,"integrated_data","merged_naive.rds"))
+saveRDS(merged_naive,file.path(integr.dir,"merged_naive.rds"))
 ```
 
 ### Visualize basic clusters
 
+Note that a prespecified cluster resolution was defined in the above code. Outside of this tutorial, it is recommended to evaluate multiple resolutions for apparent 'batch effects' in the naive merge before proceeding to integration methods.
+
+**For further development**: define sample colors and condition colors via YAML frontmatter params and in a more generalizable way, e.g. using `RColorBrewer` palettes or `viridis` palettes.
+
 ```{r naive_merge_basic_cluster_viz, fig.width = 16, fig.height = 12}
 
-#-----------------------------------------------
-# STEP 4: Visualize batch effects in naive merge
-#-----------------------------------------------
- 
+sample_ids <- unique(merged_naive@meta.data$sample_id)
+
 # Define color palettes for visualization
 # 8 samples need 8 distinct, visible colors
 sample_colors <- c(
   "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",  # Healthy 1-4: Red, Blue, Green, Purple
   "#FF7F00", "#A65628", "#F781BF", "#999999"   # Post_Patient 1-4: Orange, Brown, Pink, Gray
 )
-names(sample_colors) <- sample_metadata$sample_id
+names(sample_colors) <- sample_ids
  
 # 2 conditions need 2 distinct colors
 condition_colors <- c(
@@ -279,10 +317,7 @@ ggsave(file.path(integr.dir,"plots/01_naive_merge_batch_effects.png"), combined_
 The criterion used in this walkthrough for excessive contribution of a single sample to a cluster is >50% of cluster membership.
 
 ```{r naive_merge_batch_effects}
-#-----------------------------------------------
-# STEP 5: Quantify batch effects with mixing metrics
-#-----------------------------------------------
- 
+
 # Calculate per-cluster sample composition
 cluster_composition <- table(merged_naive$seurat_clusters, merged_naive$sample_id)
 cluster_composition_pct <- prop.table(cluster_composition, margin = 1) * 100
@@ -297,48 +332,45 @@ cat("  Clusters dominated by single sample (>50%):", n_batch_clusters,
 # Clusters dominated by single sample (>50%): 1 / 19
  
 if (n_batch_clusters > 0) {
-  cat("    Naive merge shows significant batch effects\n")
-  cat("  → Integration is necessary\n")
+  cat("    Naive merge shows significant sample-dependent effects\n")
+  cat("  → Integration may be necessary\n")
 }
 ```
-## Integration procedures
 
-The `merged_naive` Seurat object has had metadata added in prior steps. It's ready for further steps. A copy will be made as `merged_seurat` and the integration procedures wil be run on this new object.
+## Optional object subsetting prior to integration procedurers
 
-**Note**: the original tutorial performed standard Seurat normalization (`NormalizeData`, `FindVariableFeatures`, `ScaleData`) followed by `RunPCA` to prepare the object for integration. For this modified walkthough (2026-05) I'm using `SCTransform` followed by PCA reduction.
+The `merged_naive` Seurat object has had metadata added in prior steps. A copy will be made as `merged_integrations` and the integration procedures wil be run on this new object.
 
-```{r copy_object}
-merged_seurat <- merged_naive
-```
+The original tutorial did not recommend **subsampling** the object to reduce compute burden for calculating integration. This should be considered for large data sets.
 
-**Also note**: the original tutorial did not recommend **subsampling** the object to reduce compute burden for calculating integration. This could be considered for large data sets.
+Code is presented below to subset the object, sequentially according to biosample (cell donor) so as not to skew the subset toward biosamples with larger cell numbers. Whehter to perform subsetting is controlled by a flag in the YAML frontmatter `params$subsetted_integrations` and associated `params$subset_cell_frac`. Note this procedure involves random cell sampling per biosample and will not adjust to preserve cells from rare clusters.
 
-Code is presented below to subset the object, sequentially according to biosample (cell donor) so as not to skew the subset toward biosamples with larger cell numbers. Default `eval = FALSE`
+The use of `sketching` in Seurat v5 and assessing integration procedures on the `sketch` is another possibility. Methods are provided for `sketching` that balance uniform sampling with sufficient rescue of cells from rare or spare clusters. If this procedure is chosen, the code for subsequent integration procedures would need to be modified so integration is performed on the `sketch` Assay rather than `RNA`.
 
-### Subsampling code
+```{r subset_Seurat_object, eval = TRUE}
+if (params$subsetted_integrations) {
+  sample_ids <- unique(merged_naive@meta.data$sample_id)
+  cell_frac <- params$subset_cell_frac
 
-Not run 2026-05-09 in order to replicate original tutorial, but worth considering for future work. The subsetted object would be used to evaluate integration method performance, and then the chosen method would be applied to the original object with all cells.
+  cells_to_keep <- NULL
+  for (s in seq_along(sample_ids)) {
+    tmp_sub <- subset(merged_naive, subset = sample_id == sample_ids[s])
+    tmp_keep <- sample(colnames(tmp_sub), round(ncol(tmp_sub) * cell_frac))
+    cells_to_keep <- c(cells_to_keep, tmp_keep)
+  }
+  rm(tmp_sub, tmp_keep)
 
-```{r subset_Seurat_object, eval = FALSE}
-
-sample_ids <- unique(merged_seurat@meta.data$sample_id)
-cell_frac <- 0.20
-
-cells_to_keep <- NULL
-for (s in seq_along(sample_ids)) {
-  tmp_sub <- subset(merged_seurat, subset = sample_id == sample_ids[s])
-  tmp_keep <- sample(colnames(tmp_sub), round(ncol(tmp_sub) * cell_frac))
-  cells_to_keep <- c(cells_to_keep, tmp_keep)
+  merged_integrations <- subset(merged_naive, cells = cells_to_keep)
+} else {
+  merged_integrations <- merged_naive
 }
-rm(tmp_sub, tmp_keep)
-
-merged_seurat <- subset(merged_seurat, cells = cells_to_keep)
 ```
 
+## Perform integrations and collect within the same object
 
-### Preserve integration layers within the same object
+The original tutorial produced a separate Seurat object for each integration. This should not be necessary, so I've performed each integration within the `merged_integrations` object. The UMAPs for each integration can be retrieved by name.
 
-The original tutorial produced a separate Seurat object for each integration. This should not be necessary, so I've performed each integration within the `merged_seurat` object. The UMAPs for each integration can be retrieved by name.
+**Note:** `FindNeighbors` and `FindClusters` are not run on the dimension reductions following integration at this point. The reason is that evaluation of appropriate cluster granularity (resolution) will be performed after assessing integration. Comparison plots of integration methods in Part 2 will only show effects on sample mixing and condition preservation.
 
 There are `saveRDS` commands at the end of each integration section to preserve work done in case of crashes. These can be commented out.
 
@@ -346,86 +378,71 @@ There are `saveRDS` commands at the end of each integration section to preserve 
 
 ```{r run_cca}
 
-#-----------------------------------------------
-# STEP 7: CCA Integration
-#-----------------------------------------------
- 
 # Integrate using CCA
-merged_seurat <- IntegrateLayers(
-  object = merged_seurat,
+merged_integrations <- IntegrateLayers(
+  object = merged_integrations,
   method = CCAIntegration,
+  assay = "RNA",
   orig.reduction = "pca",
   new.reduction = "integrated.cca",
-  normalization.method = "SCT",
+  normalization.method = "LogNormalize", # standard nfs. Alternative is "SCT"
   dims = 1:30,
-  verbose = FALSE
+  verbose = TRUE
 )
  
-# Standard downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.cca", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "cca_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.cca", dims = 1:30, 
+merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.cca", dims = 1:30, 
                           reduction.name = "umap.cca", verbose = FALSE)
  
-cat("CCA integration complete:", length(unique(merged_seurat$cca_clusters)), "clusters\n")
-# CCA integration complete: 23 clusters
+cat("CCA integration complete\n")
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
+saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
 ```
 
 ### RPCA integration
 
 ```{r rpca_integration}
-#-----------------------------------------------
-# STEP 8: RPCA Integration
-#-----------------------------------------------
- 
+
 # Integrate using RPCA
-merged_seurat <- IntegrateLayers(
-  object = merged_seurat,
+merged_integrations <- IntegrateLayers(
+  object = merged_integrations,
   method = RPCAIntegration,
+  assay = "RNA",
   orig.reduction = "pca",
   new.reduction = "integrated.rpca",
-  normalization.method = "SCT",
+  normalization.method = "LogNormalize", # standard nfs. Alternative is "SCT"
   dims = 1:30,
-  verbose = FALSE
+  verbose = TRUE
 )
- 
-# Downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.rpca", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "rpca_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.rpca", dims = 1:30,
+
+merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.rpca", dims = 1:30,
                            reduction.name = "umap.rpca", verbose = FALSE)
  
-cat("RPCA integration complete:", length(unique(merged_seurat$rpca_clusters)), "clusters\n")
-# RPCA integration complete: 22 clusters
+cat("RPCA integration complete\n")
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
+saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
 ```
 
 ### Harmony integration
 
 ```{r harmony}
-# Run Harmony (corrects batch effects on PCA embedding)
 # Harmony works directly on PCA embedding
 
-merged_seurat <- RunHarmony(merged_seurat,
-                            group.by.vars = "sample_id", # covariates for which harmony will remove effect on data
+merged_integrations <- RunHarmony(merged_integrations,
+                            group.by.vars = params$harmony_covariates, # covariates for which harmony will remove effect on data
                             reduction.use = "pca",
                             dims.use = 1:50,
                             reduction.save = "integrated.harmony"
                             )
  
-# Downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.harmony", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "harmony_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.harmony", dims = 1:30,
+merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.harmony", dims = 1:30,
                                 reduction.name = "umap.harmony", verbose = FALSE)
  
-cat("Harmony integration complete:", length(unique(merged_seurat$harmony_clusters)), "clusters\n")
-# Harmony integration complete: 21 clusters
+cat("Harmony integration complete\n")
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
+saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
 ```
 
 ### FastMNN integration
@@ -435,42 +452,39 @@ Note that unlike the other three methods evaluated here, FastMNN (in the `batche
 The code chunk below is for FastMNN integration after the **standard normalization** workflow, and with an identical number of genes in each layer established by upstream chunk 'gene check'.
 
 ```{r fastmnn_integration_nfs}
-#-----------------------------------------------
-# STEP 10: FastMNN Integration
-#-----------------------------------------------
-DefaultAssay(merged_seurat) <- "RNA"
 
-merged_seurat <- IntegrateLayers(
-  object = merged_seurat,
+merged_integrations <- IntegrateLayers(
+  object = merged_integrations,
   method = FastMNNIntegration,
   orig.reduction = "pca",
   new.reduction = "integrated.mnn",
-  verbose = FALSE
+  verbose = TRUE
 )
  
-cat("FastMNN integration complete\n")
- 
-# Downstream workflow
-merged_seurat <- FindNeighbors(merged_seurat, reduction = "integrated.mnn", dims = 1:30, verbose = FALSE)
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.6, cluster.name = "fastmnn_clusters", verbose = FALSE)
-merged_seurat <- RunUMAP(merged_seurat, reduction = "integrated.mnn", dims = 1:30,
+merged_integrations <- RunUMAP(merged_integrations, reduction = "integrated.mnn", dims = 1:30,
                               reduction.name = "umap.mnn", verbose = FALSE)
- 
-cat("Clustering complete:", length(unique(merged_seurat$fastmnn_clusters)), "clusters\n")
-# FastMNN integration complete: 20 clusters
 
-DefaultAssay(merged_seurat) <- "SCT" # back to previous state
+cat("FastMNN integration complete\n")
 
-saveRDS(merged_seurat,file.path(integr.dir,"integrated_data","merged_seurat_with_integrations.rds"))
+cat("Saving current object with integrations to ", file.path(integr.dir,"merged_integrations.rds"), "\n")
+saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
 ```
 
 #### Difficulties with FastMNN and SCTransform
 
-`SCTransform` can select different numbers of variable genes for each layer or sample (~= cell donor). This differs from standard normalization, for which there has already been a check to ensure each layer has the same number of genes (see upstream chunk 'gene_check').
+`SCTransform` can select different numbers of variable genes for each layer or sample (~= cell donor). This differs from standard normalization, for which there has already been a check to ensure each layer has the same number of genes.
 
-The `FastMNN` function from `batchelor` is very strict about reconciling genes across layers or batches. An alternative is illustrated by the **`SeuratIntegrate`** package used in Q3 2025, in which the command `DoIntegrate(MNNIntegration...)` calls the `mnnCorrect` function from `batchelor` under the hood. This handles `SCTransform` Assays gracefully, but is very slow.
+The `FastMNN` function from `batchelor` is very strict about reconciling genes across layers or batches. An alternative is illustrated by the **`SeuratIntegrate`** package examined in Q3 2025, in which the command `DoIntegrate(MNNIntegration...)` calls the `mnnCorrect` function from `batchelor` under the hood. This handles `SCTransform` Assays gracefully, but is very slow.
 
 Another alternative would be to construct a custom `SeuratWrappers` function to integrate `mnnCorrect` into Seurat's `IntegrateLayers` function.
+
+## Remove params file
+
+Clean for next notebook
+
+```{r clean params}
+rm(params)
+```
 
 ## R sessionInfo
 

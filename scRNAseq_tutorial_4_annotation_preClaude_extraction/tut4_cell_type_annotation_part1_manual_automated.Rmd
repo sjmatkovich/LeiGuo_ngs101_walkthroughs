@@ -37,8 +37,8 @@ library(SeuratObject)
 
 # Speeds up FindAllMarkers (Wilcoxon rank-sum test) within Seurat
 library(presto)
-# install.packages('devtools')
-# devtools::install_github('immunogenomics/presto')
+# install.packages('pak')
+# pak::pak('immunogenomics/presto')
 
 # Automated annotation methods
 library(SingleR)

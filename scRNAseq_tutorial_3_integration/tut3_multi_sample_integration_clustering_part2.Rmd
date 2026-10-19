@@ -472,7 +472,7 @@ save(mixing_results,
 
 If `params$subsetted_integrations` is FALSE, then there is no need to re-perform integration work. In this case, the `merged_naive` object will not be re-loaded, and instead the reductions not needed within the `merged_reductions` object will be simply removed.
 
-```{r implement_chosen_integration, eval = TRUE}
+```{r implement_chosen_integration, eval = FALSE}
 
 if (params$subsetted_integrations) {
   cat("Reloading full merged_naive object\n")
@@ -486,24 +486,13 @@ if (params$subsetted_integrations) {
       method = CCAIntegration,
       orig.reduction = "pca",
       new.reduction = "integrated.cca",
-      normalization.method = "RNA",
+      normalization.method = "LogNormalize",
       dims = 1:30,
       verbose = TRUE
     )
 
-    # Standard downstream workflow
-    merged_chosen_integration <- FindNeighbors(
-      merged_chosen_integration,
-      reduction = "integrated.cca",
-      dims = 1:30,
-      verbose = TRUE
-    )
-    merged_chosen_integration <- FindClusters(
-      merged_chosen_integration,
-      resolution = 0.6,
-      cluster.name = "cca_clusters",
-      verbose = TRUE
-    )
+    # Generate UMAP for later visualization
+    # but save neighbors and clusters for Part 3 notebook
     merged_chosen_integration <- RunUMAP(
       merged_chosen_integration,
       reduction = "integrated.cca",
@@ -525,24 +514,13 @@ if (params$subsetted_integrations) {
       method = RPCAIntegration,
       orig.reduction = "pca",
       new.reduction = "integrated.rpca",
-      normalization.method = "RNA",
+      normalization.method = "LogNormalize",
       dims = 1:30,
       verbose = TRUE
     )
 
-    # Standard downstream workflow
-    merged_chosen_integration <- FindNeighbors(
-      merged_chosen_integration,
-      reduction = "integrated.rpca",
-      dims = 1:30,
-      verbose = TRUE
-    )
-    merged_chosen_integration <- FindClusters(
-      merged_chosen_integration,
-      resolution = 0.6,
-      cluster.name = "rpca_clusters",
-      verbose = TRUE
-    )
+    # Generate UMAP for later visualization
+    # but save neighbors and clusters for Part 3 notebook
     merged_chosen_integration <- RunUMAP(
       merged_chosen_integration,
       reduction = "integrated.rpca",
@@ -566,19 +544,9 @@ if (params$subsetted_integrations) {
       dims.use = 1:50,
       reduction.save = "integrated.harmony"
     )
-    merged_chosen_integration <- FindNeighbors(
-      merged_chosen_integration,
-      reduction = "integrated.harmony",
-      dims = 1:30,
-      verbose = TRUE
-    )
-    merged_chosen_integration <- FindClusters(
-      merged_chosen_integration,
-      resolution = 0.6,
-      cluster.name = "harmony_clusters",
-      verbose = TRUE
-    )
-    merged_seurat_subset <- RunUMAP(
+    # Generate UMAP for later visualization
+    # but save neighbors and clusters for Part 3 notebook
+    merged_chosen_integration <- RunUMAP(
       merged_chosen_integration,
       reduction = "integrated.harmony",
       dims = 1:30,
@@ -600,19 +568,8 @@ if (params$subsetted_integrations) {
       verbose = TRUE
     )
 
-    # Standard downstream workflow
-    merged_chosen_integration <- FindNeighbors(
-      merged_chosen_integration,
-      reduction = "integrated.mnn",
-      dims = 1:30,
-      verbose = TRUE
-    )
-    merged_chosen_integration <- FindClusters(
-      merged_chosen_integration,
-      resolution = 0.6,
-      cluster.name = "fastmnn_clusters",
-      verbose = TRUE
-    )
+    # Generate UMAP for later visualization
+    # but save neighbors and clusters for Part 3 notebook
     merged_chosen_integration <- RunUMAP(
       merged_chosen_integration,
       reduction = "integrated.mnn",
@@ -667,6 +624,14 @@ if (params$subsetted_integrations) {
     file.path(integr.dir, "merged_chosen_integration.rds")
   )
 }
+```
+
+## Remove params file
+
+Clean for next notebook
+
+```{r clean params}
+rm(params)
 ```
 
 ## R sessionInfo

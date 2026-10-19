@@ -478,6 +478,14 @@ The `FastMNN` function from `batchelor` is very strict about reconciling genes a
 
 Another alternative would be to construct a custom `SeuratWrappers` function to integrate `mnnCorrect` into Seurat's `IntegrateLayers` function.
 
+## Remove params file
+
+Clean for next notebook
+
+```{r clean params}
+rm(params)
+```
+
 ## R sessionInfo
 
 ```{r export_sessionInfo}

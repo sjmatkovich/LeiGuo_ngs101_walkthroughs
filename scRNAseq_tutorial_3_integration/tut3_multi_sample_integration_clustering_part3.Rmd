@@ -140,13 +140,14 @@ This will over-write the existing _nn and _snn graphs in the object, which were 
 ```{r find_neighbors}
 integrated_reduction <- grep("^integrated\\.", Reductions(merged_integrated), value = TRUE)
 if (length(integrated_reduction) == 0) {
-  stop("No integrated reduction found in the Seurat object. Please check the integration step.")
+  warning("No integrated reduction found in the Seurat object. Using reduction from naive merge.")
+  integrated_reduction <- "pca"
 } else if (length(integrated_reduction) > 1) {
   warning("Multiple integrated reductions found. Using the first one: ", integrated_reduction[1])
   integrated_reduction <- integrated_reduction[1]
 }
 
-merged_integrated <- FindNeighbors(merged_integrated, reduction = integrated_reduction, verbose = TRUE)
+merged_integrated <- FindNeighbors(merged_integrated, reduction = integrated_reduction, dims = 1:30, verbose = TRUE)
 ```
 
 ## Examine clustering at multiple resolutions
@@ -295,17 +296,16 @@ if (length(small_clusters) > 0) {
 }
  
 # Check sample distribution across clusters
-sample_cluster_table <- table(merged_integrated$seurat_clusters, merged_integrated$sample_id)
+# drop = TRUE returns a named vector rather than a one-column data frame incompatible with table()
+sample_cluster_table <- table(merged_integrated$seurat_clusters, merged_integrated[[params$biosample_id, drop = TRUE]])
 sample_cluster_pct <- prop.table(sample_cluster_table, margin = 1) * 100
- 
-# Identify sample-specific clusters (>50% from one sample)
-sample_specific <- apply(sample_cluster_pct, 1, max) > 50
+sample_specific <- apply(sample_cluster_pct, 1, function(x) any(x > 50))
 if (any(sample_specific)) {
   cat("\n  Warning: Sample-dominated clusters detected (>50% from single sample):\n")
   print(names(which(sample_specific)))
   cat("   These may indicate incomplete batch correction\n")
 }
- 
+
 # Visualize sample distribution in clusters
 sample_dist_data <- as.data.frame.matrix(sample_cluster_pct)
 sample_dist_data$cluster <- rownames(sample_dist_data)
@@ -325,7 +325,8 @@ ggsave(file.path(integr.dir,"plots/clustering/08_sample_distribution_clusters.pn
        width = 12, height = 6, dpi = 300)
  
 # Check condition distribution
-condition_dist <- table(merged_integrated$seurat_clusters, merged_integrated$condition)
+# drop = TRUE returns a named vector rather than a one-column data frame incompatible with table()
+condition_dist <- table(merged_integrated$seurat_clusters, merged_integrated[[params$condition_id, drop = TRUE]])
 condition_dist_pct <- prop.table(condition_dist, margin = 1) * 100
  
 cat("\nCondition distribution across clusters:\n")
@@ -461,6 +462,14 @@ integration_summary <- data.frame(
  
 write.csv(integration_summary, file.path(integr.dir,"metadata/integration_summary.csv"), row.names = FALSE)
 
+```
+
+## Remove params file
+
+Clean for next notebook
+
+```{r clean params}
+rm(params)
 ```
 
 ## R sessionInfo

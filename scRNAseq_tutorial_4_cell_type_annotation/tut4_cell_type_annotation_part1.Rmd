@@ -5,8 +5,9 @@ author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
-  integrated.rds: "integration_analysis/integrated_data/seurat_integrated_clustered.rds" # tut3 part3 output, relative to base.dir
-  annot.subdir: "cell_type_annotation" # output subdirectory under base.dir
+  integr.dir: "integration_analysis" # output subdirectory under base.dir for integration results relstive to base.dir
+  integrated.rds: "merged_integrated_clustered.rds" # tut3 part3 output, relative to integr.dir
+  annot.subdir: "cell_type_annotation" # output subdirectory under integr.dir
   species: "human" # for mito/ribo gene filters; options are "human" or "mouse"
   seed: 42 # random seed
   cluster.col: "seurat_clusters" # metadata column holding cluster IDs
@@ -30,6 +31,8 @@ editor_options:
   markdown:
     wrap: 80
 ---
+
+## Setup
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -69,33 +72,17 @@ library(patchwork)
 library(scales)
 library(viridis)
 
-if (!exists("params") || !is.list(params)) {
-  # Running interactively (e.g. via "Run Cell") rather than through
-  # knit/render, so `params` was never created by rmarkdown::render().
-  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
-  # defaults live in exactly one place (the YAML block above) instead of
-  # being duplicated here.
-  rmd_path <- tryCatch(
-    # Only reliable when this document is the active editor tab; if focus
-    # has moved to another file, this will pick up the wrong path.
-    rstudioapi::getSourceEditorContext()$path,
-    error = function(e) NA_character_
-  )
-  if (is.na(rmd_path) || !nzchar(rmd_path)) {
-    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
-    # the working directory is the project root.
-    rmd_path <- "scRNAseq_tutorial_4_cell_type_annotation/tut4_cell_type_annotation_part1.Rmd"
-  }
-  params <- rmarkdown::yaml_front_matter(rmd_path)$params
-}
+source(here::here("helper_functions", "params_read.R"))
+params <- params_ingest()
 
 # Set working directory
 base.dir <- params$base.dir
-annot.dir <- file.path(base.dir, params$annot.subdir)
+integr.dir <- file.path(base.dir, params$integr.dir)
+annot.dir <- file.path(integr.dir, params$annot.subdir)
 
 # Create output directories
 for (d in c("plots", "plots/manual_annotation", "annotations")) {
-  if (!dir.exists(file.path(annot.dir, d))) dir.create(file.path(annot.dir, d), recursive = TRUE)
+  if (!dir.exists(file.path(integr.dir, d))) dir.create(file.path(integr.dir, d), recursive = TRUE)
 }
 
 # Set random seed for reproducibility
@@ -110,8 +97,8 @@ sample.col <- params$sample.col
 condition.col <- params$condition.col
 condition.colors <- setNames(unlist(params$condition.palette), unlist(params$condition.levels))
 
-# Intermediate files passed on to part 2
-annotated_part1.file <- "integrated_manual_annotated_seurat.rds"
+# Intermediate file to be passed on to part 2
+annotated_part1.file <- "merged_integrated_clustered_manual_annotated.rds"
 ```
 
 ## Load integrated data from tutorial 3
@@ -124,7 +111,7 @@ annotated_part1.file <- "integrated_manual_annotated_seurat.rds"
 # Path to integrated Seurat object from Part 3
 # (the article reads integrated_clustered_seurat.rds; this series' tutorial 3
 # saves seurat_integrated_clustered.rds)
-integrated_path <- file.path(base.dir, params$integrated.rds)
+integrated_path <- file.path(integr.dir, params$integrated.rds)
 
 # Load the object
 cat("Reading in integrated Seurat object:", integrated_path, "\n")

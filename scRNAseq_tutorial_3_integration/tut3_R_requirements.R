@@ -17,9 +17,6 @@ options(repos = c(CRAN = "https://cloud.r-project.org"))
 # Core packages (already installed in Part 2)
 # Seurat, ggplot2, dplyr, patchwork
 
-install.packages("devtools")
-devtools::install_github("bnprks/BPCells") # BPCells facilitates large count matrix handling for Seurat
-
 # Install Bioconductor packages for advanced integration
 if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
@@ -42,8 +39,13 @@ install.packages(c(
   "viridis"          # Perceptually uniform color scales
 ))
 
+remotes::install_github("bnprks/BPCells/r") # BPCells facilitates large count matrix handling for Seurat
+# `remotes` is used to install packages from GitHub but can have issues (2026-10) with authentication
+# try pak with pak::pak("bnprks/BPCells/r")
+
 # Wrapper functions for integration methods
 remotes::install_github('satijalab/seurat-wrappers')
+# try pak with pak::pak("satijalab/seurat-wrappers")
 
 # Install future for parallel processing (used by RPCA integration)
 install.packages("future")

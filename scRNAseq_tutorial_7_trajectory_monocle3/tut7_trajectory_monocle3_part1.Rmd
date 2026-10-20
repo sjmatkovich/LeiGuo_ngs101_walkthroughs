@@ -84,25 +84,8 @@ library(patchwork)
 library(RColorBrewer)
 library(viridis)
 
-if (!exists("params") || !is.list(params)) {
-  # Running interactively (e.g. via "Run Cell") rather than through
-  # knit/render, so `params` was never created by rmarkdown::render().
-  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
-  # defaults live in exactly one place (the YAML block above) instead of
-  # being duplicated here.
-  rmd_path <- tryCatch(
-    # Only reliable when this document is the active editor tab; if focus
-    # has moved to another file, this will pick up the wrong path.
-    rstudioapi::getSourceEditorContext()$path,
-    error = function(e) NA_character_
-  )
-  if (is.na(rmd_path) || !nzchar(rmd_path)) {
-    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
-    # the working directory is the project root.
-    rmd_path <- "scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part1.Rmd"
-  }
-  params <- rmarkdown::yaml_front_matter(rmd_path)$params
-}
+source(here::here("helper_functions", "params_read.R"))
+params <- params_ingest()
 
 # Set working directory
 base.dir <- params$base.dir

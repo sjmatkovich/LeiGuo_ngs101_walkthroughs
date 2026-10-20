@@ -25,30 +25,6 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-Params ingest
-
-```{r ingest_params_if_necessary}
-if (!exists("params") || !is.list(params)) {
-  # Running interactively (e.g. via "Run Cell") rather than through
-  # knit/render, so `params` was never created by rmarkdown::render().
-  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
-  # defaults live in exactly one place (the YAML block above) instead of
-  # being duplicated here.
-  rmd_path <- tryCatch(
-    # Only reliable when this document is the active editor tab; if focus
-    # has moved to another file, this will pick up the wrong path.
-    rstudioapi::getSourceEditorContext()$path,
-    error = function(e) NA_character_
-  )
-  if (is.na(rmd_path) || !nzchar(rmd_path)) {
-    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
-    # the working directory is the project root.
-    rmd_path <- "scRNAseq_tutorial_3_integration/tut3_multi_sample_integration_clustering_part1.Rmd"
-  }
-  params <- rmarkdown::yaml_front_matter(rmd_path)$params
-}
-```
-
 ## Description
 
 Primary source:
@@ -86,6 +62,9 @@ library(reshape2)         # Data reshaping for visualization
 # Parallel processing
 library(future)
 options(future.globals.maxSize = 10 * 1024^3)  # Increase to 10GB for large datasets - needed during integration steps
+
+source(here::here("helper_functions", "params_read.R"))
+params <- params_ingest()
 
 # Set working directory
 base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
@@ -477,14 +456,6 @@ saveRDS(merged_integrations,file.path(integr.dir,"merged_integrations.rds"))
 The `FastMNN` function from `batchelor` is very strict about reconciling genes across layers or batches. An alternative is illustrated by the **`SeuratIntegrate`** package examined in Q3 2025, in which the command `DoIntegrate(MNNIntegration...)` calls the `mnnCorrect` function from `batchelor` under the hood. This handles `SCTransform` Assays gracefully, but is very slow.
 
 Another alternative would be to construct a custom `SeuratWrappers` function to integrate `mnnCorrect` into Seurat's `IntegrateLayers` function.
-
-## Remove params file
-
-Clean for next notebook
-
-```{r clean params}
-rm(params)
-```
 
 ## R sessionInfo
 

@@ -8,7 +8,7 @@ metadata:
   modified: 2026-10-17T19:03:00.128Z
 ---
 
-Notebooks in `scRNAseq_tutorial_N_*/` follow the tut2/tut3 template: YAML with `title`, `subtitle`, `author: "Scot J Matkovich; Lei Guo"`, date, `params:` (inline `#` comments), html_document toc/code_folding hide, `markdown: wrap: 80`; `setup` chunk; `## Description` with "Primary source" link; `step1_libs_data` chunk with the `params` fallback block (rebuild from `rmarkdown::yaml_front_matter`, fallback path to the Rmd itself); `# STEP n:` banners kept from the article; closing sessionInfo chunk.
+Notebooks in `scRNAseq_tutorial_N_*/` follow the tut2/tut3 template: YAML with `title`, `subtitle`, `author: "Scot J Matkovich; Lei Guo"`, date, `params:` (inline `#` comments), html_document toc/code_folding hide, `markdown: wrap: 80`; `setup` chunk; `## Description` with "Primary source" link; `step1_libs_data` chunk that sources `helper_functions/params_read.R` (via `here::here()`) and calls `params_ingest()` before directory definitions; `# STEP n:` banners kept from the article; closing sessionInfo chunk.
 
 **Rules learned:**
 - Hard-coded values (paths, column names, thresholds, cell types, colors, seed) go into `params`; `setwd()` becomes `file.path(base.dir, <x>.subdir, ...)`.

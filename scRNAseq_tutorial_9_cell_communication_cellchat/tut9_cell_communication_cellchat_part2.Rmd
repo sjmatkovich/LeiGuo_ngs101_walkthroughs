@@ -1,0 +1,207 @@
+---
+title: "ngs101_scRNAseq_walkthrough_9 - Cell-cell communication with CellChat"
+subtitle: "part 2 - Post_Treatment group: CellChat object and communication network"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.subdir: "trajectory_analysis" # tutorial 7 (Monocle 3) part 1 output subdirectory under base.dir
+  input.rds: "results/seurat_subset_downsampled.rds" # tutorial 7 part 1 output, relative to base.dir/input.subdir
+  cellchat.subdir: "cell_communication_cellchat" # output subdirectory under base.dir (same as part 1)
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  condition.col: "condition" # metadata column with condition labels
+  sample.col: "sample_id" # metadata column with sample IDs (becomes the CellChat 'samples' column)
+  post.level: "Post_Treatment" # condition analysed in this notebook
+  assay: "RNA" # assay holding the log-normalized data used by CellChat
+  db.species: "human" # CellChatDB species: "human" or "mouse" (same as part 1)
+  db.subset: "" # "" = full database; must match part 1 so the two conditions are comparable
+  do.fast: false # identifyOverExpressedGenes(): FALSE = Wilcoxon test (no presto needed), as in the article
+  prob.type: "triMean" # computeCommunProb() averaging method
+  nboot: 100 # computeCommunProb() permutations (100 is sufficient for exploration)
+  min.cells: 10 # filterCommunication(): minimum cells in sender or receiver group
+  keep.min_cells: 10 # cell types with fewer cells than this are reported (the Healthy object had them removed in part 1)
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-cell-cell-communication-in-single-cell-rna-seq-data-complete-beginners-guide-part-9-cellchat-analysis/>
+
+Part 2 of 3. The same CellChat inference as in part 1 (object, database,
+preprocessing, communication probability, pathway aggregation, centrality) is
+run for the **Post_Treatment** condition, without the plots and pattern
+analysis. The object is saved for the comparison in part 3.
+
+**Input.** As in part 1, the Seurat object saved by tutorial 7 (Monocle 3)
+part 1, `seurat_subset_downsampled.rds`; **tutorial 7 part 1 must be run
+first.** Part 1 of this tutorial does not need to be run before this notebook,
+but part 3 needs both CellChat objects.
+
+Code is taken from the source article's code block for Part 2 (Post_Treatment).
+Changes made for this notebook series: hard-coded values moved into the YAML
+front matter, paths built from `params` rather than `setwd()`, and changes
+marked `ADDED:` or `FIX:` in comments. `computeCommunProb()` is the slow step.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+library(CellChat)
+library(Seurat)
+library(patchwork)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_9_cell_communication_cellchat/tut9_cell_communication_cellchat_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+cc.dir <- file.path(base.dir, params$cellchat.subdir)
+
+options(stringsAsFactors = FALSE)
+
+# ADDED: hand-off directory
+dir.create(file.path(cc.dir, "results"), recursive = TRUE, showWarnings = FALSE)
+
+set.seed(params$seed)
+
+# Column names from params
+celltype.col <- params$celltype.col
+condition.col <- params$condition.col
+sample.col <- params$sample.col
+```
+
+## Load the downsampled Seurat object
+
+```{r step2_load_data}
+# FIX: the article's seurat_subset.rds is not written by any notebook in this
+# series; the tutorial 7 part 1 object seurat_subset_downsampled.rds is used instead.
+input.file <- file.path(base.dir, params$input.subdir, params$input.rds)
+# ADDED: stop with a clear message if tutorial 7 part 1 has not been run
+stopifnot(file.exists(input.file))
+cat("Reading in Seurat object:", input.file, "\n")
+seurat_obj <- readRDS(input.file)
+
+# ADDED: check the metadata columns and condition needed below
+stopifnot(all(c(celltype.col, condition.col, sample.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(params$post.level %in% seurat_obj@meta.data[[condition.col]])
+stopifnot(params$assay %in% Assays(seurat_obj))
+
+# ADDED: CellChat reads the 'data' layer; join it if a Seurat v5 object keeps one layer per sample
+data_layers <- Layers(seurat_obj[[params$assay]], search = "^data")
+if (length(data_layers) > 1) {
+  seurat_obj[[params$assay]] <- JoinLayers(seurat_obj[[params$assay]])
+}
+
+# ADDED: cell types in the input object
+cat("Cell types in the input object:\n")
+print(table(seurat_obj@meta.data[[celltype.col]]))
+```
+
+## Cell-cell communication analysis of the Post_Treatment group
+
+```{r step2_post_treatment}
+#-----------------------------------------------
+# STEP 2: Part 2: Cell-Cell Communication Analysis of the Post_Treatment Group
+#-----------------------------------------------
+# Subset to Post_Treatment condition
+cells.post <- colnames(seurat_obj)[seurat_obj@meta.data[[condition.col]] == params$post.level]
+seurat_post <- subset(seurat_obj, cells = cells.post)
+
+# ADDED: cell counts per cell type; part 1 removed Healthy cell types with fewer
+# than params$keep.min_cells cells, and part 3 handles differing cell-type sets
+table(seurat_post@meta.data[[celltype.col]])
+small_types <- names(which(table(seurat_post@meta.data[[celltype.col]]) < params$keep.min_cells))
+if (length(small_types) > 0) {
+  message("ADDED: Post_Treatment cell types with fewer than ", params$keep.min_cells,
+          " cells (not removed, as in the article): ", paste(small_types, collapse = ", "))
+}
+
+# Map sample_id to the 'samples' column that CellChat v2 expects
+# Must be a factor — CellChat will warn and coerce it if not
+seurat_post$samples <- factor(seurat_post@meta.data[[sample.col]])
+
+# Set the cell identities before creating the CellChat object
+Idents(seurat_post) <- celltype.col
+
+# Create CellChat object directly from the Seurat object
+cellchat_post <- createCellChat(
+  object   = seurat_post,
+  group.by = celltype.col,
+  assay    = params$assay
+)
+
+# Set database
+# ADDED: species and optional subset from params (same as part 1)
+CellChatDB <- get(paste0("CellChatDB.", params$db.species))
+if (nzchar(params$db.subset)) {
+  CellChatDB <- subsetDB(CellChatDB, search = params$db.subset)
+}
+cellchat_post@DB <- CellChatDB
+
+# Preprocess
+cellchat_post <- subsetData(cellchat_post)
+cellchat_post <- identifyOverExpressedGenes(cellchat_post, do.fast = params$do.fast)
+cellchat_post <- identifyOverExpressedInteractions(cellchat_post)
+
+# Infer communication
+cellchat_post <- computeCommunProb(cellchat_post, type = params$prob.type, nboot = params$nboot)
+cellchat_post <- filterCommunication(cellchat_post, min.cells = params$min.cells)
+cellchat_post <- computeCommunProbPathway(cellchat_post)
+cellchat_post <- aggregateNet(cellchat_post)
+
+# Systems analysis
+cellchat_post <- netAnalysis_computeCentrality(cellchat_post, slot.name = "netP")
+
+# Save
+# ADDED: hand-off to part 3 (file name kept from the article, now under results/)
+saveRDS(cellchat_post, file = file.path(cc.dir, "results/cellchat_Post_Treatment.rds"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut9_cellchat_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut9_cellchat_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

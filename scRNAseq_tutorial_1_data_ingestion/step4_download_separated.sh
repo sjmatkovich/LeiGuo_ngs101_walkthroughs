@@ -15,7 +15,7 @@ SAMPLES=("Healthy_1" "Healthy_2" "Healthy_3" "Healthy_4" "Pre_Patient_1" "Pre_Pa
 
 for SRR in "${SRRS[@]}"; do
 # Step 1: Download SRA file
-# This creates a directory ~/ncbi/public/sra/SRR14575500.sra
+# This creates a directory ~/ncbi/public/sra/SRR145755xx.sra
 prefetch $SRR
  
 # Step 2: Convert to FASTQ with split files

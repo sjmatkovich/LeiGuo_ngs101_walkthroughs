@@ -1,0 +1,256 @@
+---
+title: "ngs101_scRNAseq_walkthrough_5 - Cell-type-specific differential analysis"
+subtitle: "part 1 - load annotated data, cell type proportions and propeller testing"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
+  annotated.rds: "annotations/integrated_annotated_seurat.rds" # tutorial 4 part 3 output, relative to base.dir/annot.subdir
+  diff.subdir: "differential_analysis" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  patient.col: "patient_id" # metadata column with patient IDs
+  condition.ref: "Healthy" # reference condition level
+  condition.test: "Post_Treatment" # test condition level (contrasts are test vs. reference)
+  condition.palette: ["#2E86AB", "#F18F01"] # plot colors for reference, test (in that order)
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/single-cell-rna-seq-beginners-guide-part-5-cell-type-specific-differential-expression-proportion-testing-and-functional-pathway-analysis/>
+
+Part 1 of 4. Starting from the annotated Seurat object produced in tutorial 4,
+this notebook asks whether the *composition* of the sample changes between
+conditions: per-sample cell type proportions are tabulated, plotted, and tested
+with `speckle::propeller()` (arcsine-square-root transformation, linear model,
+empirical Bayes moderation, Benjamini-Hochberg FDR).
+
+Code is taken from the source article's code blocks. Changes made for this
+notebook series: hard-coded values moved into the YAML front matter, paths built
+from `params` rather than `setwd()`, and the fixes marked `FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Proportion analysis
+library(speckle)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_5_differential_analysis/tut5_differential_analysis_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+diff.dir <- file.path(base.dir, params$diff.subdir)
+
+# Create output directories
+for (d in c("plots/proportions", "results")) {
+  if (!dir.exists(file.path(diff.dir, d))) dir.create(file.path(diff.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names, condition levels and colors from params
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+condition.levels <- c(params$condition.ref, params$condition.test)
+condition.colors <- setNames(unlist(params$condition.palette), condition.levels)
+```
+
+## Load annotated Seurat object from tutorial 4
+
+```{r step2_load_obj}
+#-----------------------------------------------
+# STEP 2: Load annotated Seurat object from tutorial 4
+#-----------------------------------------------
+
+annotated.file <- file.path(base.dir, params$annot.subdir, params$annotated.rds)
+cat("Reading in annotated Seurat object:", annotated.file, "\n")
+seurat_obj <- readRDS(annotated.file)
+
+stopifnot(all(c(celltype.col, sample.col, condition.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(all(condition.levels %in% seurat_obj@meta.data[[condition.col]]))
+
+cat("Cells:", ncol(seurat_obj), "\n")
+print(table(seurat_obj@meta.data[[sample.col]], seurat_obj@meta.data[[condition.col]]))
+```
+
+## Calculate cell type proportions per sample
+
+```{r step3_proportions}
+#-----------------------------------------------
+# STEP 3: Calculate cell type proportions per sample
+#-----------------------------------------------
+
+# Calculate proportions for each sample
+proportion_data <- seurat_obj@meta.data %>%
+  group_by(.data[[sample.col]], .data[[condition.col]], .data[[celltype.col]]) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(.data[[sample.col]]) %>%
+  mutate(
+    total_cells = sum(count),
+    proportion = count / total_cells,
+    percentage = proportion * 100
+  ) %>%
+  ungroup()
+
+# Save proportion data
+write.csv(proportion_data, file.path(diff.dir, "results/cell_type_proportions_per_sample.csv"),
+          row.names = FALSE)
+
+# Display summary
+proportion_summary <- proportion_data %>%
+  group_by(.data[[condition.col]], .data[[celltype.col]]) %>%
+  summarise(
+    mean_percentage = mean(percentage),
+    sd_percentage = sd(percentage),
+    .groups = "drop"
+  )
+
+print(as.data.frame(proportion_summary), row.names = FALSE)
+```
+
+## Visualize proportions
+
+```{r step4_proportion_plots, fig.width = 12, fig.height = 6}
+#-----------------------------------------------
+# STEP 4: Visualize cell type proportions
+#-----------------------------------------------
+
+# Stacked barplot showing composition of each sample
+p_stacked <- ggplot(proportion_data,
+                    aes(x = .data[[sample.col]], y = percentage, fill = .data[[celltype.col]])) +
+  geom_bar(stat = "identity") +
+  facet_wrap(vars(.data[[condition.col]]), scales = "free_x") +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right") +
+  labs(title = "Cell Type Composition by Sample",
+       x = "Sample", y = "Percentage (%)",
+       fill = "Cell Type") +
+  scale_fill_brewer(palette = "Set3")
+print(p_stacked)
+
+ggsave(file.path(diff.dir, "plots/proportions/01_stacked_composition.png"), p_stacked,
+       width = 12, height = 6, dpi = params$plot.dpi)
+
+# Grouped barplot with error bars
+# FIX: the article's code plots columns `mean` and `sd`, but the summary table
+# above names them `mean_percentage` and `sd_percentage`
+p_grouped <- ggplot(proportion_summary,
+                    aes(x = .data[[celltype.col]], y = mean_percentage, fill = .data[[condition.col]])) +
+  geom_bar(stat = "identity", position = position_dodge(0.9)) +
+  geom_errorbar(aes(ymin = mean_percentage - sd_percentage, ymax = mean_percentage + sd_percentage),
+                position = position_dodge(0.9), width = 0.2) +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Mean Cell Type Proportions by Condition",
+       x = "Cell Type", y = "Mean Percentage (%)", fill = "Condition") +
+  scale_fill_manual(values = condition.colors)
+print(p_grouped)
+
+ggsave(file.path(diff.dir, "plots/proportions/02_grouped_proportions.png"), p_grouped,
+       width = 12, height = 6, dpi = params$plot.dpi)
+```
+
+## Statistical testing of proportion differences with propeller
+
+```{r step5_propeller}
+#-----------------------------------------------
+# STEP 5: Statistical testing of proportion differences
+#-----------------------------------------------
+
+# Prepare data for propeller
+cluster_ids <- seurat_obj@meta.data[[celltype.col]]
+sample_ids <- seurat_obj@meta.data[[sample.col]]
+
+# Create group vector (condition per sample)
+sample_to_condition <- unique(seurat_obj@meta.data[, c(sample.col, condition.col)])
+rownames(sample_to_condition) <- sample_to_condition[[sample.col]]
+group <- sample_to_condition[sample_ids, condition.col]
+
+# Run propeller test
+propeller_results <- propeller(
+  clusters = cluster_ids,
+  sample = sample_ids,
+  group = group
+)
+
+# Save results
+# FIX: row names hold the cell type labels, so they must be kept (the article
+# used row.names = FALSE, which discards them)
+write.csv(propeller_results, file.path(diff.dir, "results/propeller_proportion_test.csv"),
+          row.names = TRUE)
+
+print(propeller_results)
+```
+
+The `PropRatio` column is the ratio of mean proportions between the groups; the
+article suggests treating ratios above 1.5 or below 0.67 as biologically
+meaningful, alongside the FDR.
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut5_differential_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut5_differential_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

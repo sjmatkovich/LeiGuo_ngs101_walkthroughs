@@ -1,0 +1,424 @@
+---
+title: "ngs101_scRNAseq_walkthrough_7 - Trajectory and pseudotime analysis with Monocle 3"
+subtitle: "part 3 - validate the trajectory, find trajectory genes, return results to Seurat"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  traj.subdir: "trajectory_analysis" # output subdirectory under base.dir (same as parts 1-2)
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  condition.col: "condition" # metadata column with condition labels
+  marker.genes: ["CCR7", "LEF1", "CD69", "HLA-DRA", "IL2RA", "GZMB"] # validation markers plotted on the trajectory
+  graphtest.q: 0.05 # graph_test q-value cutoff
+  graphtest.cores: 1 # graph_test cores (the test covers every gene and is slow)
+  genes.top_n_branch: 10 # top branch-associated genes shown (by Moran's I)
+  genes.top_n_table: 20 # top trajectory genes shown (by Moran's I)
+  genes.top_n_plot: 12 # top trajectory genes plotted on the trajectory
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-7-trajectory-and-pseudotime-analysis-using-monocle-3/>
+
+Part 3 of 3. The pseudotime ordering from part 2 is checked against biology:
+pseudotime per cell type and partition, known marker genes, and a test for
+differences between conditions. `graph_test()` (Moran's I on the principal
+graph) then finds genes whose expression varies along the trajectory, and
+pseudotime is added back to the Seurat object.
+
+`graph_test()` runs on every gene in the CDS and is slow; use
+`params$graphtest.cores` to parallelize it.
+
+Code is taken from the source article's code blocks (steps 13-19 and the
+"common pitfalls" snippets). Changes made for this notebook series: hard-coded
+values moved into the YAML front matter, paths built from `params` rather than
+`setwd()`, and changes marked `ADDED:` or `FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+library(SeuratWrappers)
+
+# Trajectory inference
+library(monocle3)
+
+# Data manipulation and visualization
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part3.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+traj.dir <- file.path(base.dir, params$traj.subdir)
+
+# Create output directories
+for (d in c("plots/pseudotime", "plots/genes_over_pseudotime", "results")) {
+  if (!dir.exists(file.path(traj.dir, d))) dir.create(file.path(traj.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+celltype.col <- params$celltype.col
+condition.col <- params$condition.col
+```
+
+## Load objects from parts 1-2
+
+```{r step2_load_obj}
+# ADDED: hand-off from parts 1-2
+seurat_subset <- readRDS(file.path(traj.dir, "results/seurat_subset_downsampled.rds"))
+cds_main <- readRDS(file.path(traj.dir, "results/cds_main_ordered.rds"))
+plot_data <- readRDS(file.path(traj.dir, "results/plot_data.rds"))
+load(file.path(traj.dir, "results/traj_part1.RData")) # umap_reduction
+
+cat("CDS: ", ncol(cds_main), " cells; partitions: ",
+    paste(levels(factor(partitions(cds_main))), collapse = ", "), "\n", sep = "")
+```
+
+## Biological validation: does the trajectory make sense?
+
+Pseudotime is only comparable within a partition, so cell types are summarized
+per partition.
+
+```{r step3_pseudotime_summary}
+#-----------------------------------------------
+# STEP 13: Validation - trajectory structure per partition
+#-----------------------------------------------
+
+# Count cells in each cell type along pseudotime
+# Group by partition for proper interpretation
+pseudotime_summary <- plot_data %>%
+  group_by(partition, cell_type) %>%
+  summarise(
+    n_cells = n(),
+    median_pseudotime = median(pseudotime, na.rm = TRUE),
+    min_pseudotime = min(pseudotime, na.rm = TRUE),
+    max_pseudotime = max(pseudotime, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(partition, median_pseudotime)
+
+cat("Pseudotime summary by cell type and partition:\n")
+print(as.data.frame(pseudotime_summary))
+```
+
+### Marker genes along the trajectory
+
+Naive T cell markers (CCR7, LEF1, TCF7) should decrease along a T cell
+trajectory and activation markers (CD69, HLA-DRA, IL2RA) should increase.
+
+```{r step4_marker_genes, fig.width = 8, fig.height = 6}
+#-----------------------------------------------
+# STEP 14: Validation - marker gene expression
+#-----------------------------------------------
+
+# Test known markers along pseudotime
+marker_genes <- unlist(params$marker.genes)
+
+# Check if markers are in dataset
+marker_genes <- marker_genes[marker_genes %in% rownames(cds_main)]
+
+if (length(marker_genes) > 0) {
+  # Plot each marker along pseudotime
+  for (gene in marker_genes) {
+    p <- plot_cells(
+      cds_main,
+      genes = gene,
+      label_cell_groups = FALSE,
+      show_trajectory_graph = TRUE,
+      cell_size = 1
+    ) +
+      scale_color_viridis(option = "magma", name = "Expression") +
+      ggtitle(paste0("Expression of ", gene, " Along Trajectory"))
+    print(p)
+
+    ggsave(file.path(traj.dir, paste0("plots/genes_over_pseudotime/marker_", gene, ".png")),
+           p, width = 8, height = 6, dpi = params$plot.dpi)
+  }
+  cat("Saved marker gene trajectory plots\n")
+} else {
+  cat("Marker genes not found in dataset\n")
+}
+```
+
+### Condition effects
+
+```{r step5_condition_effects}
+#-----------------------------------------------
+# STEP 15: Validation - condition effects
+#-----------------------------------------------
+
+# Statistical test: Do conditions differ in pseudotime distribution?
+# (pseudotime scales are independent per partition, so this pooled test is a
+# rough check; the per-partition densities in part 2 are more informative)
+wilcox_test <- wilcox.test(pseudotime ~ condition, data = plot_data)
+
+cat("\nWilcoxon test of pseudotime between conditions:\n")
+cat("  W statistic:", wilcox_test$statistic, "\n")
+cat("  P-value:", format(wilcox_test$p.value, scientific = TRUE), "\n")
+
+# Calculate median pseudotime per condition
+median_summary <- plot_data %>%
+  group_by(condition) %>%
+  summarise(
+    median_pseudotime = median(pseudotime, na.rm = TRUE),
+    mean_pseudotime = mean(pseudotime, na.rm = TRUE)
+  )
+
+cat("\nMedian pseudotime by condition:\n")
+print(median_summary)
+```
+
+## Branch points and trajectory-associated genes
+
+`graph_test()` computes Moran's I, a measure of spatial autocorrelation, for
+each gene on the principal graph; genes with a high value change smoothly along
+the trajectory (including across branches). The article runs this test twice
+with identical arguments (once under "branch points", once under "genes
+correlated with pseudotime"); it is run once here and the result reused.
+
+```{r step6_graph_test}
+#-----------------------------------------------
+# STEP 16 / STEP 18: Graph test (branch-associated / pseudotime-dependent genes)
+#-----------------------------------------------
+
+# FIX: the article calls graph_test() with the same arguments in STEP 16 and
+# again in STEP 18; run once and use for both
+graph_test_results <- graph_test(
+  cds_main,
+  neighbor_graph = "principal_graph",
+  cores = params$graphtest.cores,
+  verbose = FALSE
+)
+
+# Identify genes with significant spatial autocorrelation (branch-associated)
+sig_genes <- subset(graph_test_results, q_value < params$graphtest.q)
+
+cat("\nGraph test results:\n")
+cat("  Total genes tested:", nrow(graph_test_results), "\n")
+cat("  Significant genes (q <", params$graphtest.q, "):", nrow(sig_genes), "\n")
+
+if (nrow(sig_genes) > 0) {
+  cat("\nTop", params$genes.top_n_branch, "branch-associated genes (by Moran's I):\n")
+  top_genes <- head(sig_genes[order(sig_genes$morans_I, decreasing = TRUE), ], params$genes.top_n_branch)
+  print(top_genes[, c("gene_short_name", "morans_I", "q_value")])
+}
+```
+
+## Integrate results back into the Seurat object
+
+```{r step7_to_seurat, fig.width = 10, fig.height = 8}
+#-----------------------------------------------
+# STEP 17: Add pseudotime to Seurat metadata
+#-----------------------------------------------
+
+# Create pseudotime vector with cell names (includes all partitions)
+pseudotime_vector <- pseudotime(cds_main)
+names(pseudotime_vector) <- colnames(cds_main)
+
+# Also add partition information
+partition_vector <- partitions(cds_main)
+names(partition_vector) <- colnames(cds_main)
+
+# Add to Seurat object
+seurat_subset$monocle3_pseudotime <- NA  # Initialize
+seurat_subset$monocle3_partition <- NA   # Initialize
+
+seurat_subset$monocle3_pseudotime[colnames(cds_main)] <- pseudotime_vector
+seurat_subset$monocle3_partition[colnames(cds_main)] <- as.character(partition_vector)
+
+# Visualize pseudotime in Seurat
+p_seurat_pseudotime <- FeaturePlot(
+  seurat_subset,
+  features = "monocle3_pseudotime",
+  reduction = umap_reduction,
+  pt.size = 1
+) +
+  scale_color_viridis(option = "plasma", name = "Pseudotime") +
+  ggtitle("Monocle 3 Pseudotime (All Partitions in Seurat)")
+print(p_seurat_pseudotime)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/07_pseudotime_in_seurat.png"),
+       p_seurat_pseudotime, width = 10, height = 8, dpi = params$plot.dpi)
+
+# Also visualize partition assignment
+p_seurat_partition <- DimPlot(
+  seurat_subset,
+  group.by = "monocle3_partition",
+  reduction = umap_reduction,
+  pt.size = 1
+) +
+  ggtitle("Monocle 3 Partition Assignment (in Seurat)")
+print(p_seurat_partition)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/08_partition_in_seurat.png"),
+       p_seurat_partition, width = 10, height = 8, dpi = params$plot.dpi)
+
+# Save updated Seurat object
+saveRDS(seurat_subset, file.path(traj.dir, "results/seurat_with_pseudotime.rds"))
+```
+
+## Identify genes that change along trajectories
+
+```{r step8_trajectory_genes}
+#-----------------------------------------------
+# STEP 18: Identify pseudotime-dependent genes
+#-----------------------------------------------
+
+# Genes with a significant graph_test result (computed once above; the article
+# describes this step as fitting GAMs, but it is the same Moran's I test)
+trajectory_genes <- graph_test_results
+
+# Filter for significant genes
+sig_trajectory_genes <- subset(trajectory_genes, q_value < params$graphtest.q)
+
+cat("Genes significantly associated with trajectory:\n")
+cat("  Total tested:", nrow(trajectory_genes), "\n")
+cat("  Significant (q <", params$graphtest.q, "):", nrow(sig_trajectory_genes), "\n")
+cat("  Top genes by Moran's I:\n")
+
+# Show top genes
+top20_genes <- head(sig_trajectory_genes[order(sig_trajectory_genes$morans_I, decreasing = TRUE), ], params$genes.top_n_table)
+print(top20_genes[, c("gene_short_name", "morans_I", "q_value")])
+
+# Save results
+write.csv(sig_trajectory_genes,
+          file.path(traj.dir, "results/trajectory_associated_genes.csv"),
+          row.names = FALSE)
+```
+
+### Visualize top trajectory genes
+
+```{r step9_top_gene_plots, fig.width = 14, fig.height = 12}
+#-----------------------------------------------
+# STEP 19: Visualize top trajectory genes
+#-----------------------------------------------
+
+# Select top genes for visualization
+top_genes_to_plot <- head(top20_genes$gene_short_name, params$genes.top_n_plot)
+
+# Create multi-panel plot
+gene_plots <- list()
+for (i in 1:length(top_genes_to_plot)) {
+  gene <- top_genes_to_plot[i]
+
+  gene_plots[[i]] <- plot_cells(
+    cds_main,
+    genes = gene,
+    label_cell_groups = FALSE,
+    show_trajectory_graph = TRUE,
+    cell_size = 0.75
+  ) +
+    scale_color_viridis(option = "magma", name = "Expression") +
+    ggtitle(gene) +
+    theme(plot.title = element_text(size = 10, face = "bold"),
+          legend.position = "right",
+          legend.key.size = unit(0.3, "cm"))
+}
+
+# Combine into grid
+p_top_genes <- wrap_plots(gene_plots, ncol = 3)
+print(p_top_genes)
+
+ggsave(file.path(traj.dir, "plots/genes_over_pseudotime/07_top_trajectory_genes.png"),
+       p_top_genes, width = 14, height = 12, dpi = params$plot.dpi)
+```
+
+## Common pitfalls: diagnostic checks
+
+Short checks from the article's "common pitfalls" section.
+
+**Pseudotime driven by batch?** A strong correlation of pseudotime with sample
+suggests the trajectory reflects batch rather than biology.
+
+```{r step10_pitfall_batch}
+# Check if pseudotime correlates with batch
+cor.test(plot_data$pseudotime, as.numeric(factor(plot_data$sample)))
+```
+
+**Cell cycle?** Only possible if a `Phase` column exists (from Seurat
+`CellCycleScoring()`, not run in this series).
+
+```{r step11_pitfall_cellcycle, eval = "Phase" %in% colnames(colData(cds_main))}
+# Check cell cycle phase distribution along pseudotime
+table(colData(cds_main)$Phase, cut(pseudotime(cds_main), breaks = 5))
+```
+
+**Biologically implausible root?** Check that "mature" markers are LOW at
+pseudotime = 0, and that the top trajectory genes above are known to be involved
+in the process being studied.
+
+**Too many partitions, or pseudotime compared across partitions?**
+
+```{r step12_pitfall_partitions}
+# Check number of partitions
+length(unique(partitions(cds_main)))
+
+# Check if you're comparing pseudotime across partitions
+plot_data %>% group_by(partition) %>% summarise(max_pt = max(pseudotime))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut7_trajectory_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut7_trajectory_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

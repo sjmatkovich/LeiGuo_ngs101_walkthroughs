@@ -1,0 +1,486 @@
+---
+title: "ngs101_scRNAseq_walkthrough_4 - Cell type identification"
+subtitle: "part 3 - compare annotation methods, build consensus, save annotated object"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  annot.subdir: "cell_type_annotation" # output subdirectory under base.dir (same as parts 1-2)
+  seed: 42 # random seed
+  cluster.col: "seurat_clusters" # metadata column holding cluster IDs
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  patient.col: "patient_id" # metadata column with patient IDs
+  sankey.width: 0.0833 # stratum/alluvium width (article: 1/12)
+  sankey.alpha: 0.7 # alluvium transparency
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-4-cell-type-identification/>
+
+Part 3 of 3. The four annotations from parts 1-2 (manual, SingleR, scType,
+scCATCH) are compared by confusion matrix, alluvial (Sankey-style) plot and
+side-by-side UMAP. A cluster-level table is exported for manual review; a
+consensus label is added by hand and imported to produce the final annotation.
+
+Rule of thumb used in the article for the manual review: 4/4 methods agree ->
+accept; 3/4 -> usually accept after checking markers; 2/4 -> investigate;
+no agreement -> manual review.
+
+Code is taken from the source article's code blocks (steps 15-20). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(ggalluvial)
+library(dplyr)
+library(patchwork)
+library(scales)
+library(viridis)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_4_cell_type_annotation/tut4_cell_type_annotation_part3.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+annot.dir <- file.path(base.dir, params$annot.subdir)
+
+# Create output directories
+for (d in c("plots/method_comparison", "annotations")) {
+  if (!dir.exists(file.path(annot.dir, d))) dir.create(file.path(annot.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+cluster.col <- params$cluster.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+patient.col <- params$patient.col
+
+# Files from part 2 and final outputs
+annotated_part2.file <- "integrated_automated_annotated_seurat.rds"
+```
+
+## Load object from part 2
+
+```{r step2_load_obj}
+# ADDED: hand-off from part 2
+integrated_seurat <- readRDS(file.path(annot.dir, "annotations", annotated_part2.file))
+load(file.path(annot.dir, "annotations", "annot_part1.RData")) # umap_reduction, cluster_to_celltype
+
+stopifnot(all(c("manual_annotation", "singler_annotation", "sctype_annotation",
+                "sccatch_annotation") %in% colnames(integrated_seurat@meta.data)))
+Idents(integrated_seurat) <- cluster.col
+```
+
+## Confusion matrices
+
+Cell-level cross-tabulation of each automated method against the manual
+annotation.
+
+```{r step3_confusion}
+#-----------------------------------------------
+# STEP 15: Generate confusion matrices
+#-----------------------------------------------
+
+# Function to create confusion matrix
+# FIX: the article's version of this function is cut off on the page (no
+# return value and no closing brace, so the calls below would be swallowed
+# into the function body); completed here
+create_confusion_matrix <- function(method1_labels, method2_labels,
+                                   method1_name, method2_name) {
+  conf_table <- table(
+    Method1 = method1_labels,
+    Method2 = method2_labels
+  )
+
+  cat("\n===", method1_name, "(rows) vs.", method2_name, "(columns) ===\n")
+  print(conf_table)
+
+  return(conf_table)
+}
+
+# Compare each automated method to manual
+conf_manual_vs_singler <- create_confusion_matrix(
+  integrated_seurat$manual_annotation,
+  integrated_seurat$singler_annotation,
+  "Manual", "SingleR"
+)
+
+conf_manual_vs_sctype <- create_confusion_matrix(
+  integrated_seurat$manual_annotation,
+  integrated_seurat$sctype_annotation,
+  "Manual", "scType"
+)
+
+conf_manual_vs_sccatch <- create_confusion_matrix(
+  integrated_seurat$manual_annotation,
+  integrated_seurat$sccatch_annotation,
+  "Manual", "scCATCH"
+)
+
+# Save confusion matrices
+write.csv(conf_manual_vs_singler,
+          file.path(annot.dir, "annotations/confusion_matrix_manual_vs_singler.csv"))
+write.csv(conf_manual_vs_sctype,
+          file.path(annot.dir, "annotations/confusion_matrix_manual_vs_sctype.csv"))
+write.csv(conf_manual_vs_sccatch,
+          file.path(annot.dir, "annotations/confusion_matrix_manual_vs_sccatch.csv"))
+```
+
+## Sankey diagrams
+
+```{r step4_sankey, fig.width = 12, fig.height = 10}
+#-----------------------------------------------
+# STEP 16: Create Sankey diagrams
+#-----------------------------------------------
+
+# Function to prepare Sankey data
+prepare_sankey_data <- function(method1_labels, method2_labels,
+                               method1_name, method2_name) {
+  sankey_df <- data.frame(
+    Method1 = method1_labels,
+    Method2 = method2_labels
+  ) %>%
+    group_by(Method1, Method2) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    mutate(Comparison = paste(method1_name, "vs", method2_name))
+
+  return(sankey_df)
+}
+
+# Prepare data for each comparison
+sankey_manual_singler <- prepare_sankey_data(
+  integrated_seurat$manual_annotation,
+  integrated_seurat$singler_annotation,
+  "Manual", "SingleR"
+)
+
+sankey_manual_sctype <- prepare_sankey_data(
+  integrated_seurat$manual_annotation,
+  integrated_seurat$sctype_annotation,
+  "Manual", "scType"
+)
+
+sankey_manual_sccatch <- prepare_sankey_data(
+  integrated_seurat$manual_annotation,
+  integrated_seurat$sccatch_annotation,
+  "Manual", "scCATCH"
+)
+
+# Function to create Sankey plot
+create_sankey_plot <- function(sankey_data, method1_name, method2_name) {
+  p <- ggplot(sankey_data,
+              aes(axis1 = Method1, axis2 = Method2, y = Count)) +
+    geom_alluvium(aes(fill = Method1), width = params$sankey.width, alpha = params$sankey.alpha) +
+    geom_stratum(width = params$sankey.width, fill = "white", color = "grey") +
+    geom_text(stat = "stratum", aes(label = after_stat(stratum)),
+              size = 3, fontface = "bold") +
+    scale_x_discrete(limits = c(method1_name, method2_name),
+                     expand = c(0.05, 0.05)) +
+    labs(title = paste(method1_name, "vs", method2_name),
+         subtitle = "Straight flows = agreement | Crossed flows = disagreement",
+         y = "Number of Cells") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank(),
+          plot.title = element_text(face = "bold"))
+
+  return(p)
+}
+
+# Create Sankey plots
+p_sankey_singler <- create_sankey_plot(sankey_manual_singler, "Manual", "SingleR")
+print(p_sankey_singler)
+ggsave(file.path(annot.dir, "plots/method_comparison/14_sankey_manual_vs_singler.png"),
+       p_sankey_singler, width = 12, height = 10, dpi = params$plot.dpi)
+
+p_sankey_sctype <- create_sankey_plot(sankey_manual_sctype, "Manual", "scType")
+print(p_sankey_sctype)
+ggsave(file.path(annot.dir, "plots/method_comparison/15_sankey_manual_vs_sctype.png"),
+       p_sankey_sctype, width = 12, height = 10, dpi = params$plot.dpi)
+
+p_sankey_sccatch <- create_sankey_plot(sankey_manual_sccatch, "Manual", "scCATCH")
+print(p_sankey_sccatch)
+ggsave(file.path(annot.dir, "plots/method_comparison/16_sankey_manual_vs_sccatch.png"),
+       p_sankey_sccatch, width = 12, height = 10, dpi = params$plot.dpi)
+```
+
+## Side-by-side UMAP comparison
+
+```{r step5_umap_compare, fig.width = 18, fig.height = 14}
+#-----------------------------------------------
+# STEP 17: Create comprehensive UMAP comparison
+#-----------------------------------------------
+
+# Create individual plots with consistent styling
+p_manual_comp <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "manual_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "Manual") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+p_singler_comp <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "singler_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "SingleR (Monaco)") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+p_sctype_comp <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "sctype_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "scType (Markers)") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+p_sccatch_comp <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "sccatch_annotation",
+  pt.size = 0.1
+) +
+  labs(title = "scCATCH (Tissue DB)") +
+  theme(legend.text = element_text(size = 7),
+        plot.title = element_text(face = "bold"))
+
+# Combine all four methods
+p_all_methods <- (p_manual_comp | p_singler_comp) /
+                 (p_sctype_comp | p_sccatch_comp)
+print(p_all_methods)
+
+ggsave(file.path(annot.dir, "plots/method_comparison/17_all_methods_comparison.png"),
+       p_all_methods, width = 18, height = 14, dpi = params$plot.dpi)
+```
+
+## Build consensus annotations
+
+### Step 1: Export annotations for manual review
+
+```{r step6_export}
+#-----------------------------------------------
+# STEP 18: Export annotations for manual comparison
+#-----------------------------------------------
+
+# Create comprehensive annotation table
+annotation_comparison <- data.frame(
+  cell_barcode = colnames(integrated_seurat),
+  cluster = integrated_seurat@meta.data[[cluster.col]],
+  manual = integrated_seurat$manual_annotation,
+  singler = integrated_seurat$singler_annotation,
+  sctype = integrated_seurat$sctype_annotation,
+  sccatch = integrated_seurat$sccatch_annotation,
+  sample_id = integrated_seurat@meta.data[[sample.col]],
+  condition = integrated_seurat@meta.data[[condition.col]],
+  stringsAsFactors = FALSE
+)
+
+# Export to CSV for manual review
+write.csv(annotation_comparison,
+          file.path(annot.dir, "annotations/all_methods_comparison.csv"),
+          row.names = FALSE)
+
+# Create cluster-level summary (easier to review)
+cluster_summary <- annotation_comparison %>%
+  group_by(cluster) %>%
+  summarise(
+    n_cells = n(),
+    manual_type = names(sort(table(manual), decreasing = TRUE))[1],
+    singler_type = names(sort(table(singler), decreasing = TRUE))[1],
+    sctype_type = names(sort(table(sctype), decreasing = TRUE))[1],
+    sccatch_type = names(sort(table(sccatch), decreasing = TRUE))[1],
+    .groups = "drop"
+  )
+
+# FIX: do not overwrite a cluster-level file you have already edited (re-running
+# this chunk after adding the consensus_annotation column would discard it)
+cluster_comparison.file <- file.path(annot.dir, "annotations/cluster_level_comparison.csv")
+already_edited <- file.exists(cluster_comparison.file) &&
+  "consensus_annotation" %in% colnames(read.csv(cluster_comparison.file, nrows = 1))
+if (already_edited) {
+  message("Keeping existing ", cluster_comparison.file, " (has a consensus_annotation column)")
+} else {
+  write.csv(cluster_summary, cluster_comparison.file, row.names = FALSE)
+}
+
+print(as.data.frame(cluster_summary), row.names = FALSE)
+```
+
+### Step 2: Manual comparison
+
+Open `annotations/cluster_level_comparison.csv` (in the tutorial 4 output
+directory) in a spreadsheet, add a column named `consensus_annotation`, and fill
+in a label for each cluster using method agreement together with the marker
+evidence from part 1. Save it as CSV, then run the remaining chunks. They are
+skipped while the column is missing or empty.
+
+### Step 3: Import consensus and finalize
+
+```{r step7_import, fig.width = 11, fig.height = 8}
+#-----------------------------------------------
+# STEP 19: Import consensus annotations
+#-----------------------------------------------
+
+# Read your manually edited cluster consensus file
+# (Save your Excel/Google Sheets file as CSV first)
+cluster_consensus <- read.csv(cluster_comparison.file,
+                              stringsAsFactors = FALSE)
+
+# ADDED: skip the rest if the consensus column has not been filled in yet
+have_consensus <- "consensus_annotation" %in% colnames(cluster_consensus) &&
+  any(!is.na(cluster_consensus$consensus_annotation) & nzchar(cluster_consensus$consensus_annotation))
+
+if (have_consensus) {
+  # Create mapping from cluster to consensus annotation
+  cluster_to_consensus <- setNames(
+    cluster_consensus$consensus_annotation,  # Column you created
+    cluster_consensus$cluster
+  )
+
+  # Apply consensus to all cells
+  integrated_seurat$final_annotation <- unname(cluster_to_consensus[
+    as.character(integrated_seurat@meta.data[[cluster.col]])
+  ])
+
+  # Visualize final consensus
+  p_consensus <- DimPlot(
+    integrated_seurat,
+    reduction = umap_reduction,
+    group.by = "final_annotation",
+    label = TRUE,
+    label.size = 4,
+    pt.size = 0.1,
+    repel = TRUE
+  ) +
+    ggtitle("Final Consensus Annotation") +
+    theme(plot.title = element_text(face = "bold", size = 14))
+  print(p_consensus)
+
+  ggsave(file.path(annot.dir, "plots/method_comparison/18_final_consensus_annotation.png"),
+         p_consensus, width = 11, height = 8, dpi = params$plot.dpi)
+} else {
+  message("No consensus_annotation values in ", cluster_comparison.file,
+          "; fill it in and re-run from this chunk.")
+}
+```
+
+```{r step7b_import_split, fig.width = 14, fig.height = 6, eval = have_consensus}
+# Split by condition to check biological validity
+p_consensus_split <- DimPlot(
+  integrated_seurat,
+  reduction = umap_reduction,
+  group.by = "final_annotation",
+  split.by = condition.col,
+  pt.size = 0.1,
+  ncol = 2
+) +
+  ggtitle("Final Consensus by Condition")
+print(p_consensus_split)
+
+ggsave(file.path(annot.dir, "plots/method_comparison/19_consensus_by_condition.png"),
+       p_consensus_split, width = 14, height = 6, dpi = params$plot.dpi)
+```
+
+## Save annotated data
+
+```{r step8_save, eval = have_consensus}
+#-----------------------------------------------
+# STEP 20: Save final annotated Seurat object
+#-----------------------------------------------
+
+# Save the complete annotated Seurat object
+saveRDS(integrated_seurat, file.path(annot.dir, "annotations/integrated_annotated_seurat.rds"))
+
+# Create metadata export
+metadata_export <- integrated_seurat@meta.data %>%
+  select(
+    all_of(c(sample.col, condition.col, patient.col)),
+    all_of(cluster.col),
+    manual_annotation,
+    singler_annotation,
+    sctype_annotation,
+    sccatch_annotation,
+    final_annotation
+  )
+
+write.csv(metadata_export,
+          file.path(annot.dir, "annotations/cell_metadata_final.csv"),
+          row.names = TRUE)
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut4_annotation_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut4_annotation_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

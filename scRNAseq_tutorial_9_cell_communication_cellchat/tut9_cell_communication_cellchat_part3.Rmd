@@ -1,0 +1,430 @@
+---
+title: "ngs101_scRNAseq_walkthrough_9 - Cell-cell communication with CellChat"
+subtitle: "part 3 - comparison of Healthy and Post_Treatment communication networks"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  cellchat.subdir: "cell_communication_cellchat" # output subdirectory under base.dir (same as parts 1-2)
+  seed: 42 # random seed
+  healthy.level: "Healthy" # condition of the part 1 object (used as its name in the merged object)
+  post.level: "Post_Treatment" # condition of the part 2 object (used as its name in the merged object)
+  plot.dpi: 150 # resolution of the saved PNG plots (article value)
+  reticulate.env: "r-reticulate" # Python virtualenv used by netEmbedding()
+  reticulate.packages: ["umap-learn"] # Python packages installed into that virtualenv
+  heatmap.color.out: "GnBu" # color scheme of the outgoing-signaling heatmaps
+  heatmap.color.in: "OrRd" # color scheme of the incoming-signaling heatmaps
+  bubble.sources: ["Classical Monocytes"] # sender cell types in the bubble plot
+  bubble.targets: ["CD4+ T cells", "CD8+ T cells"] # receiver cell types in the bubble plot
+  chord.sources: ["Classical Monocytes"] # sender cell types in the chord diagrams
+  chord.targets: ["CD4+ T cells"] # receiver cell types in the chord diagrams
+  chord.lab.cex: 0.5 # label size in the chord diagrams
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-cell-cell-communication-in-single-cell-rna-seq-data-complete-beginners-guide-part-9-cellchat-analysis/>
+
+Part 3 of 3. The CellChat objects for Healthy (part 1) and Post_Treatment
+(part 2) are merged and compared: total interaction number and strength,
+differential interactions between cell types, pathways whose total signaling
+changes, outgoing and incoming signaling by cell type, ligand-receptor pairs
+between selected cell types, and joint manifold learning to classify pathways
+as shared or condition-specific. The article's "Common Pitfalls"
+cell-type check on the two objects is run before the merge.
+
+**Input.** `results/cellchat_Healthy.rds` (part 1) and
+`results/cellchat_Post_Treatment.rds` (part 2) under
+`<base.dir>/<cellchat.subdir>`. Parts 1 and 2 in turn need tutorial 7 part 1
+to have been run (see their descriptions).
+
+Code is taken from the source article's code blocks (steps 3.1-3.9 and the
+cell-type check of its "Common Pitfalls" section). Changes made for this
+notebook series: hard-coded values moved into the YAML front matter, paths built
+from `params` rather than `setwd()`, and changes marked `ADDED:` or `FIX:` in
+comments. Base-graphics plots are saved to PNG as in the article and shown in
+the notebook with `knitr::include_graphics()`. `netEmbedding()` and
+`netClustering()` are the slow steps.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+library(CellChat)
+library(patchwork)
+library(ggplot2)
+library(ComplexHeatmap) # netVisual_heatmap() returns ComplexHeatmap objects
+library(reticulate)     # required by netEmbedding (Python UMAP via umap-learn)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_9_cell_communication_cellchat/tut9_cell_communication_cellchat_part3.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+cc.dir <- file.path(base.dir, params$cellchat.subdir)
+
+# Set up the Python environment for netEmbedding().
+# ADDED: wrapped in tryCatch so a Python/network problem does not stop the notebook;
+# only netEmbedding() in Step 3.8 needs this environment.
+tryCatch({
+  virtualenv_create(params$reticulate.env)
+  virtualenv_install(params$reticulate.env, packages = unlist(params$reticulate.packages))
+  use_virtualenv(params$reticulate.env, required = TRUE)
+}, error = function(e) {
+  message("ADDED: Python environment setup failed (netEmbedding() in Step 3.8 will fail ",
+          "unless umap-learn is available): ", conditionMessage(e))
+})
+
+options(stringsAsFactors = FALSE)
+
+# Create output directories for all saved plots
+plot.dir.comparison <- file.path(cc.dir, "plots/comparison")
+dir.create(plot.dir.comparison, recursive = TRUE, showWarnings = FALSE)
+
+set.seed(params$seed)
+
+# ADDED: show PNG files written by the base-graphics plots below in the notebook
+show_png <- function(...) knitr::include_graphics(path.expand(c(...)))
+```
+
+## Load and merge the two CellChat objects
+
+`mergeCellChat()` needs the same cell-type set in both objects. Part 1 removes
+Healthy cell types with fewer than 10 cells (the article's pitfall check) and
+part 2 does not, so the sets can differ; the article's cell-type check is
+therefore run here before merging, and `liftCellChat()` is used only if the
+sets differ.
+
+```{r step3_1_merge}
+#-----------------------------------------------
+# STEP 3.1: Load and Merge the Two CellChat Objects
+#-----------------------------------------------
+# Load saved objects (if starting fresh)
+# ADDED: hand-off files from parts 1 and 2; stop with a clear message if missing
+file.healthy <- file.path(cc.dir, "results/cellchat_Healthy.rds")
+file.post <- file.path(cc.dir, "results/cellchat_Post_Treatment.rds")
+stopifnot(file.exists(file.healthy), file.exists(file.post))
+cellchat_healthy <- readRDS(file.healthy)
+cellchat_post    <- readRDS(file.post)
+
+# Check that cell type names match between conditions
+# (article's "Common Pitfalls" check, moved here because mergeCellChat() needs it)
+levels(cellchat_healthy@idents)
+levels(cellchat_post@idents)
+# They must be identical — both come from seurat_obj$final_annotation
+# ADDED: if they differ, lift both objects to the union of cell types so that they can be merged
+if (!identical(sort(levels(cellchat_healthy@idents)), sort(levels(cellchat_post@idents)))) {
+  group.new <- union(levels(cellchat_healthy@idents), levels(cellchat_post@idents))
+  message("ADDED: cell-type sets differ between conditions; lifting both objects to: ",
+          paste(group.new, collapse = ", "))
+  cellchat_healthy <- liftCellChat(cellchat_healthy, group.new)
+  cellchat_post    <- liftCellChat(cellchat_post, group.new)
+}
+stopifnot(identical(sort(levels(cellchat_healthy@idents)), sort(levels(cellchat_post@idents))))
+
+# Create a named list and merge
+object.list <- list(
+  cellchat_healthy,
+  cellchat_post
+)
+names(object.list) <- c(params$healthy.level, params$post.level)
+
+# Merge into a single CellChat object for comparative analysis
+cellchat_merged <- mergeCellChat(
+  object.list,
+  add.names = names(object.list)
+)
+```
+
+## Compare total interaction numbers and strength
+
+```{r step3_2_compare_interactions}
+#-----------------------------------------------
+# STEP 3.2: Compare Total Interaction Numbers and Strength
+#-----------------------------------------------
+gg1 <- compareInteractions(cellchat_merged, show.legend = FALSE, group = c(1, 2))
+gg2 <- compareInteractions(cellchat_merged, show.legend = FALSE, group = c(1, 2), measure = "weight")
+png(file.path(plot.dir.comparison, "01_interaction_count_vs_strength.png"), width = 1200, height = 750, res = params$plot.dpi)
+print(gg1 + gg2)  # print() required to render patchwork inside png()/dev.off()
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.comparison, "01_interaction_count_vs_strength.png"))
+```
+
+## Differential interactions as circle plots
+
+```{r step3_3_circle_plots}
+#-----------------------------------------------
+# STEP 3.3: Visualize Differential Interactions as Circle Plots
+#-----------------------------------------------
+circle_files <- character()  # ADDED: collect file names to show the plots afterwards
+for (i in 1:length(object.list)) {
+  fname <- file.path(plot.dir.comparison, paste0("02_circle_", tolower(names(object.list)[i]), ".png"))
+  circle_files <- c(circle_files, fname)
+  png(fname, width = 700, height = 700, res = params$plot.dpi)
+  netVisual_circle(
+    object.list[[i]]@net$count,
+    weight.scale = TRUE, label.edge = FALSE,
+    title.name   = paste("Number of Interactions -", names(object.list)[i])
+  )
+  invisible(dev.off())
+}
+
+# Red = increased in Post_Treatment; blue = decreased
+png(file.path(plot.dir.comparison, "03a_diff_interactions_count.png"), width = 700, height = 700, res = params$plot.dpi)
+netVisual_diffInteraction(cellchat_merged, weight.scale = TRUE)
+invisible(dev.off())
+
+png(file.path(plot.dir.comparison, "03b_diff_interactions_strength.png"), width = 700, height = 700, res = params$plot.dpi)
+netVisual_diffInteraction(cellchat_merged, weight.scale = TRUE, measure = "weight")
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(circle_files)
+show_png(file.path(plot.dir.comparison, "03a_diff_interactions_count.png"))
+show_png(file.path(plot.dir.comparison, "03b_diff_interactions_strength.png"))
+```
+
+## Heatmap of differential interactions
+
+```{r step3_4_diff_heatmaps}
+#-----------------------------------------------
+# STEP 3.4: Heatmap of Differential Interactions
+#-----------------------------------------------
+# Differential interaction heatmap — interaction count
+gg1 <- netVisual_heatmap(cellchat_merged)
+
+# Differential interaction heatmap — interaction strength
+gg2 <- netVisual_heatmap(cellchat_merged, measure = "weight")
+
+png(file.path(plot.dir.comparison, "04_differential_heatmaps.png"), width = 1800, height = 750, res = params$plot.dpi)
+print(gg1 + gg2)  # print() required to render patchwork inside png()/dev.off()
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.comparison, "04_differential_heatmaps.png"))
+```
+
+## Compare pathway-level communication
+
+```{r step3_5_ranknet}
+#-----------------------------------------------
+# STEP 3.5: Compare Pathway-Level Communication
+#-----------------------------------------------
+# Information flow comparison — how does total signaling change per pathway?
+# Bars show the total communication probability summed across all cell-type pairs
+png(file.path(plot.dir.comparison, "05_rankNet_stacked.png"), width = 1050, height = 1200, res = params$plot.dpi)
+rankNet(cellchat_merged, mode = "comparison", stacked = TRUE, do.stat = TRUE)
+invisible(dev.off())
+
+# Alternatively, view only pathways that change between conditions
+png(file.path(plot.dir.comparison, "06_rankNet_sidebyside.png"), width = 1050, height = 1200, res = params$plot.dpi)
+rankNet(cellchat_merged, mode = "comparison", stacked = FALSE)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.comparison, "05_rankNet_stacked.png"))
+show_png(file.path(plot.dir.comparison, "06_rankNet_sidebyside.png"))
+```
+
+## Altered signaling in specific cell types
+
+```{r step3_6_signaling_roles}
+#-----------------------------------------------
+# STEP 3.6: Identify Altered Signaling in Specific Cell Types
+#-----------------------------------------------
+# Outgoing signaling heatmap: which pathways does each cell type send MORE or LESS after treatment?
+png(file.path(plot.dir.comparison, paste0("07_outgoing_heatmap_", names(object.list)[1], ".png")), width = 1200, height = 1000, res = params$plot.dpi)
+netAnalysis_signalingRole_heatmap(
+  object.list[[1]],        # Healthy
+  pattern  = "outgoing",
+  title    = paste(names(object.list)[1], "— Outgoing Signaling"),
+  height   = 12,
+  color.heatmap = params$heatmap.color.out
+)
+invisible(dev.off())
+
+png(file.path(plot.dir.comparison, paste0("08_outgoing_heatmap_", names(object.list)[2], ".png")), width = 1200, height = 1000, res = params$plot.dpi)
+netAnalysis_signalingRole_heatmap(
+  object.list[[2]],        # Post_Treatment
+  pattern  = "outgoing",
+  title    = paste(names(object.list)[2], "— Outgoing Signaling"),
+  height   = 12,
+  color.heatmap = params$heatmap.color.out
+)
+invisible(dev.off())
+
+# Incoming signaling heatmap for both conditions
+png(file.path(plot.dir.comparison, paste0("09_incoming_heatmap_", names(object.list)[1], ".png")), width = 1200, height = 1000, res = params$plot.dpi)
+netAnalysis_signalingRole_heatmap(
+  object.list[[1]],
+  pattern  = "incoming",
+  title    = paste(names(object.list)[1], "— Incoming Signaling"),
+  height   = 12,
+  color.heatmap = params$heatmap.color.in
+)
+invisible(dev.off())
+
+png(file.path(plot.dir.comparison, paste0("10_incoming_heatmap_", names(object.list)[2], ".png")), width = 1200, height = 1000, res = params$plot.dpi)
+netAnalysis_signalingRole_heatmap(
+  object.list[[2]],
+  pattern  = "incoming",
+  title    = paste(names(object.list)[2], "— Incoming Signaling"),
+  height   = 12,
+  color.heatmap = params$heatmap.color.in
+)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(
+  file.path(plot.dir.comparison, paste0("07_outgoing_heatmap_", names(object.list)[1], ".png")),
+  file.path(plot.dir.comparison, paste0("08_outgoing_heatmap_", names(object.list)[2], ".png")),
+  file.path(plot.dir.comparison, paste0("09_incoming_heatmap_", names(object.list)[1], ".png")),
+  file.path(plot.dir.comparison, paste0("10_incoming_heatmap_", names(object.list)[2], ".png"))
+)
+```
+
+## Bubble plot and chord diagrams of specific cell-type pairs
+
+```{r step3_7_bubble_chord}
+#-----------------------------------------------
+# STEP 3.7: Bubble Plot of Specific Cell-Type Pair Interactions
+#-----------------------------------------------
+# ADDED: stop early if a cell type named in params is not in the objects
+celltypes.all <- levels(object.list[[1]]@idents)
+stopifnot(all(c(unlist(params$bubble.sources), unlist(params$bubble.targets),
+                unlist(params$chord.sources), unlist(params$chord.targets)) %in% celltypes.all))
+
+# Compare L-R interactions between Classical Monocytes (sender) and T cells (receiver)
+png(file.path(plot.dir.comparison, "11_bubble_monocyte_to_Tcells.png"), width = 1500, height = 1200, res = params$plot.dpi)
+netVisual_bubble(
+  cellchat_merged,
+  sources.use = unlist(params$bubble.sources),
+  targets.use = unlist(params$bubble.targets),
+  comparison  = c(1, 2),
+  angle.x     = 45
+)
+invisible(dev.off())
+
+# Chord diagram: L-R pairs from Classical Monocytes to CD4+ T cells — per condition
+png(file.path(plot.dir.comparison, "12_chord_monocyte_CD4T_Healthy.png"), width = 1800, height = 1800, res = params$plot.dpi)
+par(mar = c(0, 0, 0, 0))
+netVisual_chord_gene(
+  object.list[[1]],
+  sources.use  = unlist(params$chord.sources),
+  targets.use  = unlist(params$chord.targets),
+  lab.cex      = params$chord.lab.cex,
+  title.name   = paste0("Signaling from ", paste(unlist(params$chord.sources), collapse = ", "), " -- ", names(object.list)[1])
+)
+invisible(dev.off())
+
+png(file.path(plot.dir.comparison, "13_chord_monocyte_CD4T_Post_Treatment.png"), width = 1800, height = 1800, res = params$plot.dpi)
+par(mar = c(0, 0, 0, 0))
+netVisual_chord_gene(
+  object.list[[2]],
+  sources.use  = unlist(params$chord.sources),
+  targets.use  = unlist(params$chord.targets),
+  lab.cex      = params$chord.lab.cex,
+  title.name   = paste0("Signaling from ", paste(unlist(params$chord.sources), collapse = ", "), " -- ", names(object.list)[2])
+)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(
+  file.path(plot.dir.comparison, "11_bubble_monocyte_to_Tcells.png"),
+  file.path(plot.dir.comparison, "12_chord_monocyte_CD4T_Healthy.png"),
+  file.path(plot.dir.comparison, "13_chord_monocyte_CD4T_Post_Treatment.png")
+)
+```
+
+## Joint manifold learning: shared and condition-specific pathways
+
+`netEmbedding()` uses Python UMAP (umap-learn) through reticulate; see the
+Python environment set up at the top of this notebook.
+
+```{r step3_8_pairwise_embedding}
+#-----------------------------------------------
+# STEP 3.8: Joint Manifold Learning: Classify Shared vs. Condition-Specific Pathways
+#-----------------------------------------------
+# Compute functional similarity between pathways across conditions
+cellchat_merged <- computeNetSimilarityPairwise(cellchat_merged, type = "functional")
+cellchat_merged <- netEmbedding(cellchat_merged, type = "functional")
+options(future.rng.onMisuse = "ignore")
+cellchat_merged <- netClustering(cellchat_merged, type = "functional")
+
+# Visualize: pathways close together = functionally similar
+# Pathways separated by condition = condition-specific
+png(file.path(plot.dir.comparison, "14_pairwise_embedding.png"), width = 1200, height = 1050, res = params$plot.dpi)
+netVisual_embeddingPairwise(cellchat_merged, type = "functional", label.size = 3.5)
+invisible(dev.off())
+
+png(file.path(plot.dir.comparison, "15_pairwise_embedding_zoom.png"), width = 1200, height = 1050, res = params$plot.dpi)
+netVisual_embeddingPairwiseZoomIn(cellchat_merged, type = "functional", nCol = 2)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.comparison, "14_pairwise_embedding.png"))
+show_png(file.path(plot.dir.comparison, "15_pairwise_embedding_zoom.png"))
+```
+
+## Condition-specific signaling pathways
+
+```{r step3_9_ranksimilarity}
+#-----------------------------------------------
+# STEP 3.9: Identify Condition-Specific Signaling Pathways
+#-----------------------------------------------
+# Compare pathway activation — which pathways are Healthy-specific vs Post-Treatment-specific?
+png(file.path(plot.dir.comparison, "16_rankSimilarity.png"), width = 900, height = 1050, res = params$plot.dpi)
+rankSimilarity(cellchat_merged, type = "functional")
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.comparison, "16_rankSimilarity.png"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut9_cellchat_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut9_cellchat_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

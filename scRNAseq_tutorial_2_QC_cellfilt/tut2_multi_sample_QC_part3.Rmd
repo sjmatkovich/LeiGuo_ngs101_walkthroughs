@@ -3,6 +3,10 @@ title: "ngs101_scRNAseq_walkthrough_2_QC - adapted to multiple samples"
 subtitle: "part 3 - gene-level QC: choose thresholds, visualize effects"
 author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.dir: "/mnt/c/linux_share/GSE174609_scRNA/GEO_count_matrices" # directory with raw count matrices
+  species: "human" # for QC metrics; options are "human" or "mouse"
 output:
   html_document:
     toc: true
@@ -43,8 +47,28 @@ library(ggplot2)             # Custom plots when needed
 library(patchwork)           # Combine plots
 library(dplyr)               # Data manipulation
  
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_2_QC_cellfilt/tut2_multi_sample_QC_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
 # Set working directory
-base.dir <- "~/GSE174609_scRNA"
+base.dir <- params$base.dir # may contain a subdirectory with multiple samples within
 qc.dir <- file.path(base.dir,"qc_analysis_multi_loop")
 if (!dir.exists(qc.dir)) dir.create(qc.dir, recursive = TRUE)
 filt.dir <- file.path(base.dir,"filtered_data")
@@ -72,9 +96,9 @@ After filtering cells, genes are filtered based on how widely they’re detected
 
 **Detection Threshold**: The percentage-based approach (e.g., 0.1% of cells) scales with dataset size. For 5,000 cells, 0.1% = 5 cells. This is more robust than fixed “3 cells” cutoffs when analyzing datasets of varying sizes.
 
-### Note on filtering in this tutorial: Human data
+### Note on filtering in this tutorial: Human or mouse data
 
-The % MT, % ribo filtering and % HB steps below are based on **human** gene symbols. For future workflow development, select according to species.
+The % MT, % ribo filtering and % HB steps below are based on gene symbols as selected via `params$species` from the YAML front matter of this document. Current selections are `human` or `mouse`.
 
 ### Visualization prior to filtering (loop)
 
@@ -83,50 +107,81 @@ The % MT, % ribo filtering and % HB steps below are based on **human** gene symb
 # STEP 8: Gene-level QC with detection threshold
 #-----------------------------------------------
 
+if (params$species == "human") {
+  ribo_pattern <- "^RP[SL]"
+  mt_pattern <- "^MT-"
+  hb_pattern <- "^HB[AB]"
+} else if (params$species == "mouse") {
+  ribo_pattern <- "^Rp[sl]"
+  mt_pattern <- "^mt-"
+  hb_pattern <- "^Hb[ab]"
+} else {
+  stop("Invalid species parameter. Please use 'human' or 'mouse'.")
+}
+
 gene_qc_list <- list()
 
 for (n in seq_along(sample_names)) {
-
-  cat("Re-reading cell-filtered Seurat object for", sample_names[n],"\n")
-  seurat_obj <- readRDS(file = file.path(filt.dir, paste0(
-    sample_names[n], "_qc_part2_filtered.rds"
-  )))
+  cat("Re-reading cell-filtered Seurat object for", sample_names[n], "\n")
+  seurat_obj <- readRDS(
+    file = file.path(
+      filt.dir,
+      paste0(
+        sample_names[n],
+        "_qc_part2_filtered.rds"
+      )
+    )
+  )
 
   # Calculate gene detection
-counts_matrix <- LayerData(seurat_obj, layer = "counts")
-gene_detection <- rowSums(counts_matrix > 0)
- 
-gene_qc_list[[n]] <- data.frame(
-  gene = rownames(seurat_obj),
-  n_cells_detected = gene_detection,
-  pct_cells_detected = (gene_detection / ncol(seurat_obj)) * 100,
-  is_mt = grepl("^MT-", rownames(seurat_obj)),
-  is_ribo = grepl("^RP[SL]", rownames(seurat_obj)),
-  is_hb = grepl("^HB[AB]", rownames(seurat_obj))
-)
-names(gene_qc_list)[n] <- sample_names[n]
+  counts_matrix <- LayerData(seurat_obj, layer = "counts")
+  gene_detection <- rowSums(counts_matrix > 0)
+  
+  # FIX THIS SECTION TO PERFORM grepl WITH PATTERNS DEFINED ABOVE FOR SPECIES
+  gene_qc_list[[n]] <- data.frame(
+    gene = rownames(seurat_obj),
+    n_cells_detected = gene_detection,
+    pct_cells_detected = (gene_detection / ncol(seurat_obj)) * 100,
+    is_mt = grepl(mt_pattern, rownames(seurat_obj)),
+    is_ribo = grepl(ribo_pattern rownames(seurat_obj)),
+    is_hb = grepl(hb_pattern, rownames(seurat_obj))
+  )
+  names(gene_qc_list)[n] <- sample_names[n]
 
-cat("Total genes:", nrow(gene_qc_list[[n]]), "\n")
-cat("MT genes:", sum(gene_qc_list[[n]]$is_mt), 
-    "| Ribo genes:", sum(gene_qc_list[[n]]$is_ribo), 
-    "| Hb genes:", sum(gene_qc_list[[n]]$is_hb), "\n\n")
- 
-# Visualize gene detection
-(p9 <- ggplot(gene_qc_list[[n]], aes(x = pct_cells_detected)) +
-  geom_histogram(bins = 50, fill = "#118AB2", alpha = 0.7) +
-  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
-  scale_x_log10() +
-  labs(
-    title = "Gene Detection Across Cells",
-    subtitle = "Red line: 0.1% of cells threshold",
-    x = "% of Cells Expressing Gene (log scale)",
-    y = "Number of Genes"
-  ) +
-  theme_classic()
-)
- 
-ggsave(file.path(qc.dir,paste0("plots/",sample_names[n],"_06_gene_detection.png")), p9, width = 8, height = 5, dpi = 300)
+  cat("Total genes:", nrow(gene_qc_list[[n]]), "\n")
+  cat(
+    "MT genes:",
+    sum(gene_qc_list[[n]]$is_mt),
+    "| Ribo genes:",
+    sum(gene_qc_list[[n]]$is_ribo),
+    "| Hb genes:",
+    sum(gene_qc_list[[n]]$is_hb),
+    "\n\n"
+  )
 
+  # Visualize gene detection
+  (p9 <- ggplot(gene_qc_list[[n]], aes(x = pct_cells_detected)) +
+    geom_histogram(bins = 50, fill = "#118AB2", alpha = 0.7) +
+    geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+    scale_x_log10() +
+    labs(
+      title = "Gene Detection Across Cells",
+      subtitle = "Red line: 0.1% of cells threshold",
+      x = "% of Cells Expressing Gene (log scale)",
+      y = "Number of Genes"
+    ) +
+    theme_classic())
+
+  ggsave(
+    file.path(
+      qc.dir,
+      paste0("plots/", sample_names[n], "_06_gene_detection.png")
+    ),
+    p9,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
 }
 
 cat("→ EXAMINE plots/06_gene_detection.png\n")
@@ -163,7 +218,7 @@ file = file.path(qc.dir,"qc_metrics", qc_part3.file)
 
 Default is `eval = FALSE`
 
-```{r re-import_previous_QC_part3_metrics, eval = TRUE}
+```{r re-import_previous_QC_part3_metrics, eval = FALSE}
 qc_part3.file <- "qc_part3.RData"
 load(file = file.path(qc.dir,"qc_metrics", qc_part3.file))
 ```
@@ -180,7 +235,7 @@ After implementing gene-level cutoffs, plots are generated for **Variable Featur
 
 ```{r step_8b_9, fig.width = 10, fig.height = 7,eval = TRUE}
 
-min_pct_cells <- rep(0.1, 12)  # Gene must be in ≥0.1% of cells
+min_pct_cells <- rep(0.1, length(sample_names))  # Gene must be in ≥0.1% of cells
 # Alternatively: min_cells <- 3  # Gene must be in ≥3 cells
 
 after_cell_qc <- NULL
@@ -373,21 +428,6 @@ file = file.path(qc.dir,"qc_metrics", qc_final.file)
 )
 ```
 
-## R sessionInfo
-
-```{r export_sessionInfo}
-session.dir <- file.path(base.dir,"sessionInfo")
-if (!dir.exists(session.dir)){
-  dir.create(session.dir, recursive = T)
-}
-
-write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part3_sessionInfo.csv"))
-sessionInfo() |>
-  capture.output(file=file.path(session.dir,"QC_part3_sessionInfo_summary.txt"))
-
-sessionInfo()
-```
-
 ## Best Practices: Essential QC Principles
 
 1. Visual Inspection is Key
@@ -444,3 +484,18 @@ sessionInfo()
 - Amezquita RA, Lun ATL, Becht E, et al. Orchestrating single-cell analysis with Bioconductor. Nat Methods. 2020;17(2):137-145.
 - Zheng GXY, Terry JM, Belgrader P, et al. Massively parallel digital transcriptional profiling of single cells. Nat Commun. 2017;8:14049.
 - Lee H, Joo JY, Sohn DH, et al. Single-cell RNA sequencing reveals rebalancing of immunological response in patients with periodontitis after non-surgical periodontal therapy. J Transl Med. 2022;20(1):504. [Dataset source]
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir,"sessionInfo")
+if (!dir.exists(session.dir)){
+  dir.create(session.dir, recursive = T)
+}
+
+write.csv(unlist(sessionInfo()), file=file.path(session.dir,"QC_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file=file.path(session.dir,"QC_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

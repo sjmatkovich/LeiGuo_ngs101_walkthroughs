@@ -1,0 +1,508 @@
+---
+title: "ngs101_scRNAseq_walkthrough_7 - Trajectory and pseudotime analysis with Monocle 3"
+subtitle: "part 2 - learn the trajectory graph, order cells in pseudotime, visualize"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  traj.subdir: "trajectory_analysis" # output subdirectory under base.dir (same as part 1)
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  condition.levels: ["Healthy", "Post_Treatment"] # condition labels, in the same order as condition.palette
+  condition.palette: ["#2E86AB", "#F18F01"] # plot colors for each condition level
+  cluster.k: 20 # cluster_cells: number of nearest neighbors
+  cluster.method: "louvain" # cluster_cells: clustering algorithm
+  cluster.num_iter: 2 # cluster_cells: iterations for refinement
+  cluster.partition_qval: 0.05 # cluster_cells: significance threshold for partitions
+  graph.use_partition: true # learn_graph: learn separate graphs per partition
+  graph.close_loop: false # learn_graph: allow circular trajectories
+  graph.ncenter: 500 # learn_graph: number of centers for graph construction
+  graph.nn_k: 15 # learn_graph: k-nearest neighbors
+  graph.prune: true # learn_graph: remove spurious connections
+  root.celltype: "CD4+ T cells" # manual root: cells of this type, in the partition holding most of them
+  auto.root.n: 50 # root candidates (first n cells) for every other partition
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-7-trajectory-and-pseudotime-analysis-using-monocle-3/>
+
+Part 2 of 3. The preprocessed CDS from part 1 is clustered into partitions
+(groups of cells too different to be joined in one trajectory), a principal
+graph is learned within each partition, and cells are ordered in pseudotime from
+chosen roots. `learn_graph()` can take a while on several thousand cells.
+
+**Pseudotime is only comparable within a partition**: each partition has its own
+independent pseudotime scale.
+
+Code is taken from the source article's code blocks (steps 8-12). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+library(SeuratWrappers)
+
+# Trajectory inference
+library(monocle3)
+
+# Data manipulation and visualization
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+traj.dir <- file.path(base.dir, params$traj.subdir)
+
+# Create output directories
+for (d in c("plots/trajectories", "plots/pseudotime", "results")) {
+  if (!dir.exists(file.path(traj.dir, d))) dir.create(file.path(traj.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names, condition levels and colors from params
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+condition.colors <- setNames(unlist(params$condition.palette), unlist(params$condition.levels))
+```
+
+## Load objects from part 1
+
+```{r step2_load_obj}
+# ADDED: hand-off from part 1
+cds <- readRDS(file.path(traj.dir, "results/cds_preprocessed.rds"))
+cat("CDS: ", ncol(cds), " cells, ", nrow(cds), " genes\n", sep = "")
+cat("Reductions:", names(reducedDims(cds)), "\n")
+```
+
+## Learn the trajectory graph structure
+
+```{r step3_learn_graph}
+#-----------------------------------------------
+# STEP 8: Cluster cells and learn principal graph
+#-----------------------------------------------
+
+# First, cluster cells (required before learn_graph)
+# This identifies partitions and communities in the data
+cds <- cluster_cells(
+  cds,
+  reduction_method = "UMAP",
+  k = params$cluster.k,                      # Number of nearest neighbors
+  cluster_method = params$cluster.method,    # Clustering algorithm
+  num_iter = params$cluster.num_iter,        # Iterations for refinement
+  partition_qval = params$cluster.partition_qval, # Significance threshold for partitions
+  verbose = FALSE
+)
+
+cat("Number of partitions:", length(unique(partitions(cds))), "\n")
+cat("Number of clusters:", length(unique(clusters(cds))), "\n\n")
+
+# Now learn the trajectory graph structure
+cds <- learn_graph(
+  cds,
+  use_partition = params$graph.use_partition, # Learn separate graphs per partition
+  close_loop = params$graph.close_loop,       # Don't force circular trajectories
+  learn_graph_control = list(
+    ncenter = params$graph.ncenter,           # Number of centers for graph construction
+    nn.k = params$graph.nn_k,                 # k-nearest neighbors
+    prune_graph = params$graph.prune          # Remove spurious connections
+  ),
+  verbose = FALSE
+)
+```
+
+## Handling multiple partitions
+
+```{r step4_partitions}
+#-----------------------------------------------
+# STEP 9: Analyze all partitions
+#-----------------------------------------------
+
+# Count cells per partition
+partition_counts <- table(partitions(cds))
+cat("Cells per partition:\n")
+print(partition_counts)
+
+# Identify which cell types are in each partition
+cat("\nCell type distribution by partition:\n")
+for (i in names(partition_counts)) {
+  partition_cells <- colnames(cds)[partitions(cds) == i]
+  cell_types_in_partition <- table(colData(cds)[[celltype.col]][partitions(cds) == i])
+  cat("\nPartition", i, "(", partition_counts[[i]], "cells ):\n")
+  print(cell_types_in_partition)
+}
+
+# Keep all partitions for complete analysis
+cds_main <- cds
+
+cat("\nRetaining all partitions for analysis:\n")
+cat("  Total cells:", ncol(cds_main), "\n")
+cat("  Total partitions:", length(unique(partitions(cds_main))), "\n")
+cat("  Genes:", nrow(cds_main), "\n")
+```
+
+## Understanding pseudotime and root selection
+
+Pseudotime is the distance along the trajectory from a chosen **root**. The root
+should be a biologically justified starting state (e.g. a progenitor or naive
+population); a wrong root reverses the direction of the trajectory without
+changing its shape. Partitions that have no obvious biological starting
+population can be given candidate cells, and Monocle 3 selects the root node.
+
+The article orders each partition in turn (steps 10a-c), with CD4+ T cells as
+the manual root of the T/NK partition and the first 50 cells as candidates in
+the other partitions. Here the manual root is chosen by cell type
+(`params$root.celltype`; its partition is the one containing most of those
+cells), not by partition number, because partition numbering depends on the
+clustering result.
+
+### Step 10a: Partition with the manual root (CD4+ T cells in the article)
+
+```{r step5_root_manual}
+#-----------------------------------------------
+# STEP 10a: Order partition with manual root (CD4+ T cells)
+#-----------------------------------------------
+
+# ADDED: find the partition holding most cells of the root cell type (the
+# article hard-codes partition 2 for this dataset)
+all_partitions <- levels(factor(partitions(cds_main)))
+root_ct_cells <- colData(cds_main)[[celltype.col]] == params$root.celltype
+stopifnot(any(root_ct_cells))
+root_partition <- names(which.max(table(partitions(cds_main)[root_ct_cells])))
+cat("Manual root cell type:", params$root.celltype, "-> partition", root_partition, "\n")
+
+# Get all cells in this partition
+cells_manual <- colnames(cds_main)[partitions(cds_main) == root_partition]
+
+# Select the root cell type as root (biologically informed starting point)
+root_cells_manual <- cells_manual[
+  colData(cds_main)[[celltype.col]][partitions(cds_main) == root_partition] == params$root.celltype
+]
+
+cat("Partition", root_partition, "root cells (", params$root.celltype, "):",
+    length(root_cells_manual), "\n")
+```
+
+### Steps 10b-c: Remaining partitions (automatic roots)
+
+```{r step6_root_auto}
+#-----------------------------------------------
+# STEP 10b/10c: Remaining partitions - automatic roots
+#-----------------------------------------------
+
+# Provide the first n cells of each partition as candidates - Monocle 3 picks
+# the best starting point. NOTE: "first n cells" is simply column order, i.e.
+# an arbitrary set of candidates, not a biological choice
+other_partitions <- setdiff(all_partitions, root_partition)
+
+root_cells_auto <- list()
+for (p in other_partitions) {
+  cells_p <- colnames(cds_main)[partitions(cds_main) == p]
+  root_cells_auto[[p]] <- cells_p[1:min(params$auto.root.n, length(cells_p))]
+  cat("Partition", p, "root candidates provided:", length(root_cells_auto[[p]]), "\n")
+}
+```
+
+### Order cells
+
+```{r step7_order_cells}
+# FIX: the article calls order_cells() once per partition (10a, 10b, 10c).
+# Each call recomputes pseudotime for the whole object from the root cells it
+# is given, so a later call can overwrite the ordering of earlier partitions.
+# All root sets are combined and order_cells() is called once.
+cds_main <- order_cells(
+  cds_main,
+  root_cells = c(root_cells_manual, unlist(root_cells_auto, use.names = FALSE)),
+  verbose = FALSE
+)
+
+for (p in all_partitions) {
+  cat("Partition", p, "pseudotime range:",
+      round(range(pseudotime(cds_main)[partitions(cds_main) == p], na.rm = TRUE), 2), "\n")
+}
+```
+
+### Verify all partitions are ordered
+
+```{r step8_verify}
+#-----------------------------------------------
+# Verify pseudotime across all partitions
+#-----------------------------------------------
+
+cat("Cells with NA or infinite pseudotime:", sum(!is.finite(pseudotime(cds_main))), "\n\n")
+
+cat("Summary by partition:\n")
+for (i in all_partitions) {
+  pt_range <- round(range(pseudotime(cds_main)[partitions(cds_main) == i], na.rm = TRUE), 2)
+  n <- sum(partitions(cds_main) == i)
+  cat("  Partition", i, "(", n, "cells ): pseudotime", pt_range[1], "to", pt_range[2], "\n")
+}
+```
+
+If any partition shows `Inf` pseudotime, it did not receive a root; check
+`root_cells_auto` above.
+
+## Visualize trajectories across all partitions
+
+```{r step9_trajectory_plots, fig.width = 16, fig.height = 12}
+#-----------------------------------------------
+# STEP 11: Visualize trajectories and pseudotime
+#-----------------------------------------------
+
+# Plot 1: Trajectory colored by cell type
+p_trajectory_celltype <- plot_cells(
+  cds_main,
+  color_cells_by = celltype.col,
+  label_cell_groups = TRUE,
+  label_groups_by_cluster = FALSE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE,
+  graph_label_size = 3,
+  cell_size = 1
+) +
+  ggtitle("Trajectory Structure (Colored by Cell Type)") +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(size = 9))
+
+# Plot 2: Trajectory colored by pseudotime
+p_trajectory_pseudotime <- plot_cells(
+  cds_main,
+  color_cells_by = "pseudotime",
+  label_cell_groups = FALSE,
+  label_leaves = FALSE,
+  label_branch_points = TRUE,
+  label_roots = TRUE,
+  graph_label_size = 4,
+  cell_size = 1
+) +
+  scale_color_viridis(option = "plasma", name = "Pseudotime") +
+  ggtitle("Trajectory Colored by Pseudotime") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Plot 3: Trajectory colored by condition
+p_trajectory_condition <- plot_cells(
+  cds_main,
+  color_cells_by = condition.col,
+  label_cell_groups = FALSE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE,
+  cell_size = 1
+) +
+  scale_color_manual(values = condition.colors) +
+  ggtitle("Trajectory Colored by Condition") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Plot 4: Trajectory colored by partition (if multiple exist)
+n_partitions <- length(unique(partitions(cds_main)))
+
+if (n_partitions > 1) {
+  p_trajectory_partition <- plot_cells(
+    cds_main,
+    color_cells_by = "partition",
+    label_cell_groups = TRUE,
+    label_groups_by_cluster = FALSE,
+    label_leaves = FALSE,
+    label_branch_points = FALSE,
+    cell_size = 1
+  ) +
+    ggtitle("Trajectory Colored by Partition") +
+    theme(plot.title = element_text(face = "bold", size = 14))
+
+  # Combine plots (4-panel)
+  p_trajectory_overview <- (p_trajectory_celltype | p_trajectory_pseudotime) /
+                           (p_trajectory_condition | p_trajectory_partition)
+} else {
+  # Combine plots (3-panel)
+  p_trajectory_overview <- (p_trajectory_celltype | p_trajectory_pseudotime) /
+                           (p_trajectory_condition | plot_spacer())
+}
+print(p_trajectory_overview)
+
+ggsave(file.path(traj.dir, "plots/trajectories/02_trajectory_overview.png"),
+       p_trajectory_overview, width = 16, height = 12, dpi = params$plot.dpi)
+```
+
+## Custom pseudotime visualizations
+
+```{r step10_custom_plots, fig.width = 10, fig.height = 8}
+#-----------------------------------------------
+# STEP 12: Custom pseudotime visualizations
+#-----------------------------------------------
+
+# Extract data for custom plotting
+plot_data <- data.frame(
+  UMAP_1 = reducedDims(cds_main)[["UMAP"]][,1],
+  UMAP_2 = reducedDims(cds_main)[["UMAP"]][,2],
+  pseudotime = pseudotime(cds_main),
+  cell_type = colData(cds_main)[[celltype.col]],
+  condition = colData(cds_main)[[condition.col]],
+  sample = colData(cds_main)[[sample.col]],
+  partition = factor(partitions(cds_main))
+)
+
+# Custom pseudotime plot with ggplot2
+p_custom_pseudotime <- ggplot(plot_data, aes(x = UMAP_1, y = UMAP_2, color = pseudotime)) +
+  geom_point(size = 1.5, alpha = 0.8) +
+  scale_color_viridis(option = "plasma", name = "Pseudotime") +
+  labs(title = "Pseudotime Distribution Across All Partitions",
+       x = "UMAP 1", y = "UMAP 2") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "right")
+print(p_custom_pseudotime)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/03_custom_pseudotime.png"),
+       p_custom_pseudotime, width = 10, height = 8, dpi = params$plot.dpi)
+
+# Pseudotime distribution by cell type (violin plot)
+p_pseudotime_violin <- ggplot(plot_data, aes(x = reorder(cell_type, pseudotime, median),
+                                              y = pseudotime, fill = cell_type)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.7) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.shape = NA) +
+  coord_flip() +
+  labs(title = "Pseudotime Distribution by Cell Type",
+       subtitle = "Note: Pseudotime not comparable across partitions",
+       x = "Cell Type", y = "Pseudotime") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "none")
+print(p_pseudotime_violin)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/04_pseudotime_by_celltype.png"),
+       p_pseudotime_violin, width = 10, height = 6, dpi = params$plot.dpi)
+
+# Pseudotime distribution by condition (density plot with facets for partitions)
+n_partitions <- length(unique(plot_data$partition))
+
+if (n_partitions > 1) {
+  p_pseudotime_density <- ggplot(plot_data, aes(x = pseudotime, fill = condition)) +
+    geom_density(alpha = 0.6) +
+    facet_wrap(~ partition, ncol = 1,
+               labeller = labeller(partition = function(x) paste("Partition", x))) +
+    scale_fill_manual(values = condition.colors) +
+    labs(title = "Pseudotime Distribution by Condition (Per Partition)",
+         subtitle = "Each partition has independent pseudotime scale",
+         x = "Pseudotime", y = "Density", fill = "Condition") +
+    theme_classic(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", size = 14))
+} else {
+  p_pseudotime_density <- ggplot(plot_data, aes(x = pseudotime, fill = condition)) +
+    geom_density(alpha = 0.6) +
+    scale_fill_manual(values = condition.colors) +
+    labs(title = "Pseudotime Distribution by Condition",
+         x = "Pseudotime", y = "Density", fill = "Condition") +
+    theme_classic(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", size = 14))
+}
+print(p_pseudotime_density)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/05_pseudotime_by_condition.png"),
+       p_pseudotime_density, width = 10, height = 8, dpi = params$plot.dpi)
+
+# Additional plot: Partition-specific pseudotime (if multiple partitions)
+if (n_partitions > 1) {
+  # Create separate plots for each partition
+  partition_plots <- list()
+
+  for (i in levels(plot_data$partition)) {
+    partition_data <- plot_data[plot_data$partition == i, ]
+    cell_types_in_partition <- unique(partition_data$cell_type)
+
+    partition_plots[[i]] <- ggplot(partition_data,
+                                    aes(x = UMAP_1, y = UMAP_2, color = pseudotime)) +
+      geom_point(size = 2, alpha = 0.8) +
+      scale_color_viridis(option = "plasma", name = "Pseudotime") +
+      labs(title = paste0("Partition ", i),
+           subtitle = paste("Cell types:", paste(cell_types_in_partition, collapse = ", ")),
+           x = "UMAP 1", y = "UMAP 2") +
+      theme_classic(base_size = 10) +
+      theme(plot.title = element_text(face = "bold", size = 12))
+  }
+
+  # Combine partition plots
+  p_partition_combined <- wrap_plots(partition_plots, ncol = 2)
+  print(p_partition_combined)
+
+  ggsave(file.path(traj.dir, "plots/pseudotime/06_pseudotime_per_partition.png"),
+         p_partition_combined, width = 14, height = 10, dpi = params$plot.dpi)
+}
+```
+
+## Save objects for part 3
+
+```{r step11_save}
+# ADDED: hand-off to part 3
+saveRDS(cds_main, file.path(traj.dir, "results/cds_main_ordered.rds"))
+saveRDS(plot_data, file.path(traj.dir, "results/plot_data.rds"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut7_trajectory_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut7_trajectory_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

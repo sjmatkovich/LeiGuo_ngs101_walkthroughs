@@ -1,0 +1,264 @@
+---
+title: "ngs101_scRNAseq_walkthrough_12 - Gene co-expression networks with hdWGCNA"
+subtitle: "part 1 - load data, set up hdWGCNA, build metacells, set expression data, scan soft-thresholding powers"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.subdir: "trajectory_analysis" # tutorial 7 (Monocle 3) output subdirectory under base.dir
+  input.rds: "results/seurat_subset_downsampled.rds" # tutorial 7 part 1 output, relative to base.dir/input.subdir
+  wgcna.subdir: "coexpression_hdwgcna" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  n.threads: 4 # WGCNA threads (number of CPU cores to use)
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "orig.ident" # metadata column with sample IDs (article uses orig.ident; must be per-sample)
+  condition.col: "condition" # metadata column with condition labels
+  target.celltype: "Classical Monocytes" # the cell type the network is built for
+  wgcna.name: "Mono_WGCNA" # label for this analysis instance inside the Seurat object
+  gene.select: "fraction" # SetupForWGCNA gene_select
+  gene.fraction: 0.05 # genes must be expressed in at least this fraction of cells
+  metacell.k: 20 # nearest neighbors aggregated into each metacell
+  metacell.max_shared: 10 # max cells shared between any two metacells
+  metacell.reduction: "integrated.cca" # reduction used for the nearest-neighbor search
+  umap.reduction: "umap.cca" # UMAP reduction used for plots in part 2 (checked here)
+  expr.assay: "RNA" # assay used for the network expression matrix
+  expr.slot: "data" # slot (log-normalized expression) used for the network
+  network.type: "signed" # WGCNA network type for the soft power scan
+  powers.ncol: 2 # columns in the soft power plot grid
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-12-build-gene-co-expression-networks-using-hdwgcna/>
+
+Part 1 of 2. hdWGCNA adapts weighted gene co-expression network analysis
+(WGCNA) to single-cell data. Single cells are too sparse for correlation
+networks, so cells of one type from one sample are first aggregated into
+**metacells** (a cell and its nearest neighbors); the network is then built on
+the metacell expression of a single cell type (here `params$target.celltype`).
+
+This notebook: loads the downsampled annotated Seurat object, initializes
+hdWGCNA, builds and normalizes metacells, sets the expression data for the
+target cell type, and scans soft-thresholding powers. The power table is
+printed so that `soft.power` can be chosen in part 2 (manual decision). Part 2
+constructs the network, module eigengenes, hub genes, enrichment and
+differential module analysis.
+
+**Input:** the object `seurat_subset_downsampled.rds` is created by
+`scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part1.Rmd`,
+which must be run first (the article calls it `seurat_subset.rds`).
+
+Code is taken from the source article's code blocks (steps 1-5). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments. Note: the article's step headings are partly mislabelled
+(several code blocks sit under the previous step's heading and there is no
+"Step 9" code block); the `# STEP` banners here follow the article's h2/h3
+headings.
+
+## Libraries and data
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load Libraries and Data
+#-----------------------------------------------
+library(hdWGCNA)
+library(WGCNA)
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(igraph)
+library(enrichR)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_12_coexpression_hdwgcna/tut12_coexpression_hdwgcna_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Directories (the article uses setwd() and relative paths)
+base.dir <- params$base.dir
+wgcna.dir <- file.path(base.dir, params$wgcna.subdir)
+
+# Create output directory for all saved plots (and results)
+for (d in c("plots", "results")) {
+  dir.create(file.path(wgcna.dir, d), recursive = TRUE, showWarnings = FALSE)
+}
+
+set.seed(params$seed)
+
+# Column names from params
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+target.celltype <- params$target.celltype
+
+# Enable multi-threading for WGCNA correlation computations
+# Use the number of CPU cores available on your machine
+enableWGCNAThreads(nThreads = params$n.threads)
+
+# Load the downsampled annotated Seurat object saved in Part 7 (tutorial 7, part 1)
+input.path <- file.path(base.dir, params$input.subdir, params$input.rds)
+# ADDED: clear error if tutorial 7 part 1 has not been run
+if (!file.exists(input.path)) {
+  stop("Input object not found: ", input.path,
+       "\nRun tut7_trajectory_monocle3_part1.Rmd first.")
+}
+seurat_obj <- readRDS(input.path)
+
+# Confirm key metadata columns are present
+colnames(seurat_obj@meta.data)
+# ADDED: stop early if a needed metadata column is missing
+stopifnot(all(c(celltype.col, sample.col, condition.col) %in%
+                colnames(seurat_obj@meta.data)))
+
+print(table(seurat_obj[[celltype.col]][, 1]))
+print(table(seurat_obj[[condition.col]][, 1]))
+
+# ADDED: the target cell type must be present
+celltype.labels <- unique(as.character(seurat_obj[[celltype.col]][, 1]))
+if (!target.celltype %in% celltype.labels) {
+  stop("target.celltype '", target.celltype, "' not found in ", celltype.col,
+       ". Available labels: ", paste(sort(celltype.labels), collapse = ", "))
+}
+
+# ADDED: the reductions used for metacells (part 1) and plots (part 2) must exist
+stopifnot(params$metacell.reduction %in% Reductions(seurat_obj),
+          params$umap.reduction %in% Reductions(seurat_obj))
+
+# ADDED: metacells are built per cell type x sample; the article groups by
+# orig.ident, which must identify the biological sample
+if (sample.col == "orig.ident" && "sample_id" %in% colnames(seurat_obj@meta.data)) {
+  n.orig <- length(unique(seurat_obj$orig.ident))
+  n.sample <- length(unique(seurat_obj$sample_id))
+  if (n.orig < n.sample) {
+    warning("orig.ident has ", n.orig, " levels but sample_id has ", n.sample,
+            "; orig.ident is not per-sample. Consider sample.col = 'sample_id'.")
+  }
+}
+```
+
+## Initialize hdWGCNA
+
+```{r step2_setup}
+#-----------------------------------------------
+# STEP 2: Initialize hdWGCNA with SetupForWGCNA
+#-----------------------------------------------
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = params$gene.select,   # Include genes expressed in at least 'fraction' of cells
+  fraction    = params$gene.fraction, # 5% minimum cell fraction -- filters very rare transcripts
+  wgcna_name  = params$wgcna.name     # Label for this analysis instance inside the Seurat object
+)
+```
+
+## Construct metacells
+
+```{r step3_metacells}
+#-----------------------------------------------
+# STEP 3: Construct Metacells
+#-----------------------------------------------
+seurat_obj <- MetacellsByGroups(
+  seurat_obj  = seurat_obj,
+  group.by    = c(celltype.col, sample.col), # Never mix cell types or samples
+  k           = params$metacell.k,           # Aggregate the 20 nearest neighbors into each metacell
+  max_shared  = params$metacell.max_shared,  # Max cells shared between any two metacells (controls overlap)
+  reduction   = params$metacell.reduction,   # Use CCA integration embeddings for nearest-neighbor search
+  ident.group = celltype.col
+)
+
+# Normalize the metacell expression matrix
+seurat_obj <- NormalizeMetacells(seurat_obj)
+```
+
+## Set the expression data
+
+```{r step4_datexpr}
+#-----------------------------------------------
+# STEP 4: Set the Expression Data for Network Construction
+#-----------------------------------------------
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group_name = target.celltype,     # The cell type to analyze
+  group.by   = celltype.col,        # Metadata column containing cell type labels
+  assay      = params$expr.assay,
+  slot       = params$expr.slot     # Use log-normalized expression
+)
+```
+
+## Select the soft-thresholding power
+
+```{r step5_softpower}
+#-----------------------------------------------
+# STEP 5: Select the Soft-Thresholding Power
+#-----------------------------------------------
+# Test a range of soft powers (1-20 for signed networks)
+seurat_obj <- TestSoftPowers(seurat_obj, networkType = params$network.type)
+
+# Assigning to a variable avoids any attempt to render on screen (important on HPC)
+plot_list <- PlotSoftPowers(seurat_obj)
+p_softpower <- wrap_plots(plot_list, ncol = params$powers.ncol)
+ggsave(file.path(wgcna.dir, "plots/soft_power.pdf"), plot = p_softpower, width = 10, height = 5)
+# ADDED: show the plot in the notebook
+print(p_softpower)
+
+# ADDED: print the power table to guide the choice of soft.power (part 2);
+# pick the lowest power at which the scale-free fit (SFT.R.sq) reaches ~0.8-0.9
+power_table <- GetPowerTable(seurat_obj)
+print(power_table)
+```
+
+The soft power itself is chosen in part 2 (`params$soft.power`, article default
+6) after inspecting the plot and table above.
+
+## Save objects for part 2
+
+```{r step5_save}
+# ADDED: hand-off to part 2 (hdWGCNA results live inside the Seurat object)
+saveRDS(seurat_obj, file.path(wgcna.dir, "results/seurat_wgcna_prenetwork.rds"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut12_hdwgcna_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut12_hdwgcna_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

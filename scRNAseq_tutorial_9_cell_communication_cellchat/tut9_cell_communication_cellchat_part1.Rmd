@@ -1,0 +1,671 @@
+---
+title: "ngs101_scRNAseq_walkthrough_9 - Cell-cell communication with CellChat"
+subtitle: "part 1 - Healthy group: CellChat object, communication network, pathways, roles, patterns"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  input.subdir: "trajectory_analysis" # tutorial 7 (Monocle 3) part 1 output subdirectory under base.dir
+  input.rds: "results/seurat_subset_downsampled.rds" # tutorial 7 part 1 output, relative to base.dir/input.subdir
+  cellchat.subdir: "cell_communication_cellchat" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  condition.col: "condition" # metadata column with condition labels
+  sample.col: "sample_id" # metadata column with sample IDs (becomes the CellChat 'samples' column)
+  healthy.level: "Healthy" # condition analysed in this notebook
+  assay: "RNA" # assay holding the log-normalized data used by CellChat
+  plot.dpi: 150 # resolution of the saved PNG plots (article value)
+  reticulate.env: "r-reticulate" # Python virtualenv used by netEmbedding()
+  reticulate.packages: ["umap-learn"] # Python packages installed into that virtualenv
+  db.species: "human" # CellChatDB species: "human" or "mouse"
+  db.subset: "" # "" = all interaction categories (article Option A); or e.g. "Secreted Signaling" (Option B)
+  do.fast: false # identifyOverExpressedGenes(): FALSE = Wilcoxon test (no presto needed), as in the article
+  prob.type: "triMean" # computeCommunProb() averaging method
+  nboot: 100 # computeCommunProb() permutations (100 is sufficient for exploration)
+  min.cells: 10 # filterCommunication(): minimum cells in sender or receiver group
+  keep.min_cells: 10 # pitfall check: cell types with fewer cells are removed before createCellChat()
+  pathway.show: "MHC-II" # signaling pathway shown in the pathway-level plots
+  hierarchy.receivers: [1, 2] # hierarchy plot receivers, as indices into the cell-type levels (article: B cells, CD4+ T cells)
+  npatterns.outgoing: 5 # K for outgoing patterns; chosen by eye from the selectK plot (article value)
+  npatterns.incoming: 6 # K for incoming patterns; chosen by eye from the selectK plot (article value)
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-cell-cell-communication-in-single-cell-rna-seq-data-complete-beginners-guide-part-9-cellchat-analysis/>
+
+Part 1 of 3. CellChat infers cell-cell communication from ligand and receptor
+expression: for every pair of cell groups and every ligand-receptor pair in the
+CellChatDB database it computes a communication probability, tests it by
+permutation, and aggregates the result by signaling pathway.
+
+This notebook runs the analysis for the **Healthy** condition only: build the
+CellChat object, infer and aggregate the network, plot interactions and one
+signaling pathway (MHC-II), find dominant senders and receivers, identify
+global communication patterns (non-negative matrix factorization, NMF) and
+group pathways by functional similarity. The object is saved for part 3. Part 2
+repeats the inference for the Post_Treatment condition, and part 3 compares the
+two.
+
+**Input.** The article reads a downsampled Seurat object from Parts 7 / 7-2.
+Here that is the object saved by tutorial 7 (Monocle 3) part 1,
+`seurat_subset_downsampled.rds`, so **tutorial 7 part 1 must be run first**
+(this notebook does not downsample). The object needs the metadata columns
+`params$celltype.col`, `params$condition.col` and `params$sample.col`.
+
+Code is taken from the source article's code blocks (steps 1.1-1.12 and the
+sanity checks of its "Common Pitfalls" section). Changes made for this notebook
+series: hard-coded values moved into the YAML front matter, paths built from
+`params` rather than `setwd()`, and changes marked `ADDED:` or `FIX:` in
+comments. Base-graphics plots are saved to PNG as in the article and shown in
+the notebook with `knitr::include_graphics()`. The slow steps are
+`computeCommunProb()`, `selectK()` / `identifyCommunicationPatterns()` (NMF)
+and `netEmbedding()` / `netClustering()`.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1.1: Load Libraries and Data
+#-----------------------------------------------
+library(CellChat)
+library(Seurat)
+library(patchwork)
+library(NMF)        # required by selectK and identifyCommunicationPatterns
+library(foreach)    # required by NMF parallel backend
+library(ggalluvial) # required by netAnalysis_river (river/Sankey plots)
+library(reticulate) # required by netEmbedding (Python UMAP via umap-learn)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_9_cell_communication_cellchat/tut9_cell_communication_cellchat_part1.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+cc.dir <- file.path(base.dir, params$cellchat.subdir)
+
+# Set up the Python environment for netEmbedding().
+# virtualenv_create() is safe to call every run — it does nothing if the env exists.
+# ADDED: wrapped in tryCatch so a Python/network problem does not stop the notebook;
+# only netEmbedding() (Step 1.11) needs this environment.
+tryCatch({
+  virtualenv_create(params$reticulate.env)
+  virtualenv_install(params$reticulate.env, packages = unlist(params$reticulate.packages))
+  use_virtualenv(params$reticulate.env, required = TRUE)
+}, error = function(e) {
+  message("ADDED: Python environment setup failed (netEmbedding() in Step 1.11 will fail ",
+          "unless umap-learn is available): ", conditionMessage(e))
+})
+
+options(stringsAsFactors = FALSE)
+
+# Force NMF to run sequentially — prevents "none of the packages are loaded" errors
+# that occur when NMF spawns parallel worker processes with empty environments
+registerDoSEQ()
+
+# Create output directories for all saved plots
+plot.dir.healthy <- file.path(cc.dir, "plots/healthy")
+dir.create(plot.dir.healthy,    recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(cc.dir, "plots/comparison"), recursive = TRUE, showWarnings = FALSE)
+# ADDED: hand-off directory
+dir.create(file.path(cc.dir, "results"), recursive = TRUE, showWarnings = FALSE)
+
+set.seed(params$seed)
+
+# Column names from params
+celltype.col <- params$celltype.col
+condition.col <- params$condition.col
+sample.col <- params$sample.col
+
+# ADDED: show PNG files written by the base-graphics plots below in the notebook
+show_png <- function(...) knitr::include_graphics(path.expand(c(...)))
+```
+
+## Load the downsampled Seurat object
+
+```{r step1_1_load_data}
+# Load the downsampled annotated Seurat object from Part 7 / Part 7-2
+# FIX: the article's seurat_subset.rds is not written by any notebook in this
+# series; the tutorial 7 part 1 object seurat_subset_downsampled.rds is used instead.
+input.file <- file.path(base.dir, params$input.subdir, params$input.rds)
+# ADDED: stop with a clear message if tutorial 7 part 1 has not been run
+stopifnot(file.exists(input.file))
+cat("Reading in Seurat object:", input.file, "\n")
+seurat_obj <- readRDS(input.file)
+
+# ADDED: check the metadata columns and condition needed below
+stopifnot(all(c(celltype.col, condition.col, sample.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(params$healthy.level %in% seurat_obj@meta.data[[condition.col]])
+stopifnot(params$assay %in% Assays(seurat_obj))
+
+# ADDED: CellChat reads the 'data' layer; join it if a Seurat v5 object keeps one layer per sample
+data_layers <- Layers(seurat_obj[[params$assay]], search = "^data")
+if (length(data_layers) > 1) {
+  seurat_obj[[params$assay]] <- JoinLayers(seurat_obj[[params$assay]])
+}
+
+# ADDED: cell types in the input object
+cat("Cell types in the input object:\n")
+print(table(seurat_obj@meta.data[[celltype.col]]))
+
+# Confirm the metadata columns available — we need 'final_annotation' and 'condition'
+head(seurat_obj@meta.data)
+```
+
+## Subset to the Healthy group
+
+```{r step1_2_subset}
+#-----------------------------------------------
+# STEP 1.2: Subset to the Healthy Group
+#-----------------------------------------------
+# Subset to Healthy condition only
+cells.healthy <- colnames(seurat_obj)[seurat_obj@meta.data[[condition.col]] == params$healthy.level]
+seurat_healthy <- subset(seurat_obj, cells = cells.healthy)
+
+# Confirm how many cells and which cell types remain
+table(seurat_healthy@meta.data[[celltype.col]])
+```
+
+## ADDED: sanity checks before creating the CellChat object
+
+The article lists these checks in its "Common Pitfalls" section, after the
+analysis. The cell-type filter (the third check) modifies the Healthy Seurat
+object, so it has to run **before** `createCellChat()` and is therefore placed
+here.
+
+```{r step1_2b_checks}
+# ADDED: moved from the article's "Common Pitfalls" section (data layer, cell counts)
+# Confirm the data layer contains log-normalized values (non-integer, non-zero mean)
+summary(GetAssayData(seurat_healthy, assay = params$assay, layer = "data")@x)[3]  # median should be > 0
+# ADDED: stop if the layer is empty or all zero
+stopifnot(summary(GetAssayData(seurat_healthy, assay = params$assay, layer = "data")@x)[3] > 0)
+
+# Check cell counts per cell type
+table(seurat_healthy@meta.data[[celltype.col]])
+
+# Remove cell types with fewer than 10 cells before creating the CellChat object
+keep_types <- names(which(table(seurat_healthy@meta.data[[celltype.col]]) >= params$keep.min_cells))
+cells.keep <- colnames(seurat_healthy)[seurat_healthy@meta.data[[celltype.col]] %in% keep_types]
+seurat_healthy <- subset(seurat_healthy, cells = cells.keep)
+# ADDED: report what is left
+cat("Cell types kept:", paste(keep_types, collapse = ", "), "\n")
+table(seurat_healthy@meta.data[[celltype.col]])
+```
+
+## Create the CellChat object
+
+```{r step1_3_createcellchat}
+#-----------------------------------------------
+# STEP 1.3: Create the CellChat Object Directly from the Seurat Object
+#-----------------------------------------------
+# Map sample_id to the 'samples' column that CellChat v2 expects
+# Must be a factor — CellChat will warn and coerce it if not
+seurat_healthy$samples <- factor(seurat_healthy@meta.data[[sample.col]])
+
+# Set the cell identities to final_annotation before creating CellChat object
+Idents(seurat_healthy) <- celltype.col
+
+# Create CellChat object directly from the Seurat object
+# CellChat automatically extracts the normalized data from the RNA assay
+cellchat_healthy <- createCellChat(
+  object   = seurat_healthy,
+  group.by = celltype.col,  # metadata column for cell type grouping
+  assay    = params$assay   # use the RNA assay (log-normalized data)
+)
+```
+
+## Set the ligand-receptor database
+
+```{r step1_4_db}
+#-----------------------------------------------
+# STEP 1.4: Set the Ligand-Receptor Database
+#-----------------------------------------------
+# Use the ligand-receptor interaction database of the chosen species (article: human)
+CellChatDB <- get(paste0("CellChatDB.", params$db.species))
+
+# Option A: Use all interaction categories (recommended for most analyses)
+cellchat_healthy@DB <- CellChatDB
+
+# Option B: Use only secreted signaling (uncomment if you want a focused analysis)
+# cellchat_healthy@DB <- subsetDB(CellChatDB, search = "Secreted Signaling")
+# ADDED: Option B is selected with params$db.subset instead of uncommenting
+if (nzchar(params$db.subset)) {
+  cellchat_healthy@DB <- subsetDB(CellChatDB, search = params$db.subset)
+}
+```
+
+## Preprocess expression data
+
+```{r step1_5_preprocess}
+#-----------------------------------------------
+# STEP 1.5: Preprocess Expression Data
+#-----------------------------------------------
+# Step 1: Subset to genes in the database — reduces computation time
+cellchat_healthy <- subsetData(cellchat_healthy)
+
+# Step 2: Identify over-expressed signaling genes in each cell group
+# do.fast = FALSE uses the standard Wilcoxon test — avoids needing the presto package,
+# which frequently fails to compile on macOS. Speed difference is negligible at this dataset size.
+cellchat_healthy <- identifyOverExpressedGenes(cellchat_healthy, do.fast = params$do.fast)
+
+# Step 3: Identify over-expressed ligand-receptor interactions
+cellchat_healthy <- identifyOverExpressedInteractions(cellchat_healthy)
+```
+
+## Infer the cell-cell communication network
+
+```{r step1_6_commprob}
+#-----------------------------------------------
+# STEP 1.6: Infer the Cell-Cell Communication Network
+#-----------------------------------------------
+# Compute communication probability for each ligand-receptor pair
+# nboot: number of permutations for statistical testing (100 is sufficient for exploration)
+cellchat_healthy <- computeCommunProb(cellchat_healthy, type = params$prob.type, nboot = params$nboot)
+
+# Filter out communications with fewer than 10 cells in either the sender or receiver group
+cellchat_healthy <- filterCommunication(cellchat_healthy, min.cells = params$min.cells)
+```
+
+## Aggregate at the signaling pathway level
+
+```{r step1_7_aggregate}
+#-----------------------------------------------
+# STEP 1.7: Aggregate at the Signaling Pathway Level
+#-----------------------------------------------
+# Infer communications at the pathway level
+cellchat_healthy <- computeCommunProbPathway(cellchat_healthy)
+
+# Calculate aggregated interaction counts and total communication strength
+cellchat_healthy <- aggregateNet(cellchat_healthy)
+```
+
+## Overview: number of interactions and interaction strength
+
+```{r step1_9_1_overview}
+#-----------------------------------------------
+# STEP 1.9.1: Overview: Number of Interactions and Interaction Strength
+#-----------------------------------------------
+# Set group sizes for visualization (number of cells per cell type)
+groupSize <- as.numeric(table(cellchat_healthy@idents))
+
+png(file.path(plot.dir.healthy, "01a_interaction_count.png"), width = 700, height = 700, res = params$plot.dpi)
+netVisual_circle(
+  cellchat_healthy@net$count,
+  vertex.weight = groupSize,       # node size proportional to cell count
+  weight.scale  = TRUE,
+  label.edge    = FALSE,
+  title.name    = "Number of Interactions"
+)
+invisible(dev.off())
+
+png(file.path(plot.dir.healthy, "01b_interaction_strength.png"), width = 700, height = 700, res = params$plot.dpi)
+netVisual_circle(
+  cellchat_healthy@net$weight,
+  vertex.weight = groupSize,
+  weight.scale  = TRUE,
+  label.edge    = FALSE,
+  title.name    = "Interaction Strength"
+)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "01a_interaction_count.png"))
+show_png(file.path(plot.dir.healthy, "01b_interaction_strength.png"))
+```
+
+## Explore a specific signaling pathway
+
+```{r step1_9_2_pathway_hierarchy}
+#-----------------------------------------------
+# STEP 1.9.2: Explore a Specific Signaling Pathway
+#-----------------------------------------------
+# Check which signaling pathways are active in this dataset
+cellchat_healthy@netP$pathways
+
+# Visualize a specific pathway — MHC-II antigen presentation
+pathways.show <- params$pathway.show
+# ADDED: stop early if the pathway is not active in this dataset
+stopifnot(pathways.show %in% cellchat_healthy@netP$pathways)
+
+# ADDED: the hierarchy receivers are indices into the cell-type levels; show which cell types they are
+levels(cellchat_healthy@idents)
+cat("Hierarchy receivers:", levels(cellchat_healthy@idents)[unlist(params$hierarchy.receivers)], "\n")
+
+# Hierarchy plot: directional view of which senders communicate to a pre-defined
+# FIX: this comment is truncated in the article; it means a pre-defined set of receiver cell types.
+png(file.path(plot.dir.healthy, "02_MHCII_hierarchy.png"), width = 1400, height = 900, res = params$plot.dpi)
+netVisual_aggregate(
+  cellchat_healthy,
+  signaling        = pathways.show,
+  vertex.receiver  = unlist(params$hierarchy.receivers),       # B cells (index 1) and CD4+ T cells (index 2)
+  layout           = "hierarchy"
+)
+invisible(dev.off())
+show_png(file.path(plot.dir.healthy, "02_MHCII_hierarchy.png"))
+```
+
+How to read the hierarchy plot (the article gives this as a text diagram,
+`Source (pink) ──► Target ◄── Source (green)`): arrows point from a source
+cell type to a target cell type, and sources of the two groups are drawn in
+different colors (pink and green). The cell types given in
+`params$hierarchy.receivers` are the pre-defined receivers.
+
+```{r step1_9_2_pathway_circle_chord}
+# Circle plot of the same pathway
+png(file.path(plot.dir.healthy, "03_MHCII_circle.png"), width = 900, height = 900, res = params$plot.dpi)
+netVisual_aggregate(
+  cellchat_healthy,
+  signaling = pathways.show,
+  layout    = "circle"
+)
+invisible(dev.off())
+
+# Chord diagram — shows all interactions in the pathway
+png(file.path(plot.dir.healthy, "04_MHCII_chord.png"), width = 1800, height = 1800, res = params$plot.dpi)
+par(mar = c(0, 0, 0, 0))
+netVisual_aggregate(
+  cellchat_healthy,
+  signaling = pathways.show,
+  layout    = "chord"
+)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "03_MHCII_circle.png"))
+show_png(file.path(plot.dir.healthy, "04_MHCII_chord.png"))
+```
+
+## Contribution of individual ligand-receptor pairs
+
+```{r step1_9_3_lr_contribution}
+#-----------------------------------------------
+# STEP 1.9.3: Contribution of Individual Ligand-Receptor Pairs
+#-----------------------------------------------
+# Show the relative contribution of each L-R pair to the MHC-II pathway (ranked by communication probability)
+contrib_gg <- netAnalysis_contribution(cellchat_healthy, signaling = pathways.show)
+png(file.path(plot.dir.healthy, "05_MHCII_LR_contribution.png"), width = 900, height = 750, res = params$plot.dpi)
+print(contrib_gg)
+invisible(dev.off())
+
+# Visualize a specific L-R pair (e.g., the top contributing pair, ranked by Expression enrichment score)
+pairLR <- extractEnrichedLR(cellchat_healthy, signaling = pathways.show, geneLR.return = FALSE)
+# ADDED: stop if there is no enriched L-R pair for this pathway
+stopifnot(nrow(pairLR) >= 1)
+
+# Visualize the top pair
+png(file.path(plot.dir.healthy, "06_MHCII_top_LR_pair.png"), width = 900, height = 900, res = params$plot.dpi)
+netVisual_individual(
+  cellchat_healthy,
+  signaling    = pathways.show,
+  pairLR.use   = pairLR[1, ],    # first (strongest) L-R pair
+  layout       = "circle"
+)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "05_MHCII_LR_contribution.png"))
+show_png(file.path(plot.dir.healthy, "06_MHCII_top_LR_pair.png"))
+```
+
+## Bubble plot: all active interactions at once
+
+```{r step1_9_4_bubble}
+#-----------------------------------------------
+# STEP 1.9.4: Bubble Plot: All Active Interactions at Once
+#-----------------------------------------------
+# Bubble plot: all significant L-R pairs
+# Each bubble = one L-R interaction; x-axis = cell-type pair; y-axis = L-R pair
+# Color = communication probability; Size = p-value significance
+png(file.path(plot.dir.healthy, "07_bubble_all_interactions.png"), width = 1650, height = 1350, res = params$plot.dpi)
+netVisual_bubble(
+  cellchat_healthy,
+  remove.isolate = FALSE,    # include cell types with no interactions
+  angle.x        = 45        # rotate x-axis labels for readability
+)
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.healthy, "07_bubble_all_interactions.png"))
+```
+
+## Gene expression distribution of signaling genes
+
+```{r step1_9_5_gene_expression}
+#-----------------------------------------------
+# STEP 1.9.5: Gene Expression Distribution of Signaling Genes
+#-----------------------------------------------
+# Extract the ligand and receptor genes for the MHC-II pathway
+# subsetCommunication() returns a data frame with 'ligand' and 'receptor' columns
+mhcii_lr    <- subsetCommunication(cellchat_healthy, signaling = pathways.show)
+mhcii_genes <- unique(c(mhcii_lr$ligand, mhcii_lr$receptor))
+
+# Height scales with number of genes: 750 px per row of 3
+plot_height <- 750 * ceiling(length(mhcii_genes) / 3)
+
+# VlnPlot on seurat_healthy uses properly joined, log-normalised data
+# print() is required to render the patchwork object inside png()/dev.off()
+png(file.path(plot.dir.healthy, "08_MHCII_gene_expression.png"), width = 1500, height = plot_height, res = params$plot.dpi)
+print(
+  VlnPlot(
+    seurat_healthy,
+    features = mhcii_genes,
+    group.by = celltype.col,
+    pt.size  = 0,                      # hide individual dots for clarity
+    ncol     = 3
+  ) & theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.healthy, "08_MHCII_gene_expression.png"))
+```
+
+## Systems-level analysis: dominant senders and receivers
+
+```{r step1_9_systems}
+#-----------------------------------------------
+# STEP 1.9: Systems-Level Analysis: Who Are the Dominant Senders and Receivers?
+#-----------------------------------------------
+# Calculate network centrality scores
+# This assigns each cell type a role: sender, receiver, mediator, or influencer
+cellchat_healthy <- netAnalysis_computeCentrality(cellchat_healthy, slot.name = "netP")
+
+# Visualize signaling roles as a heatmap
+# Rows = signaling pathways; Columns = cell types; Color = centrality score
+png(file.path(plot.dir.healthy, "09_signaling_role_heatmap_outgoing.png"), width = 1200, height = 1000, res = params$plot.dpi)
+netAnalysis_signalingRole_heatmap(
+  cellchat_healthy,
+  pattern  = "outgoing",      # "outgoing" = sending cells; "incoming" = receiving cells
+  height   = 12
+)
+invisible(dev.off())
+
+# 2D scatter plot: dominant senders vs receivers
+# Cells in the upper right are both strong senders AND receivers
+png(file.path(plot.dir.healthy, "10_signaling_role_scatter.png"), width = 900, height = 750, res = params$plot.dpi)
+netAnalysis_signalingRole_scatter(cellchat_healthy)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "09_signaling_role_heatmap_outgoing.png"))
+show_png(file.path(plot.dir.healthy, "10_signaling_role_scatter.png"))
+```
+
+## Identify global communication patterns
+
+Patterns are found with NMF. `selectK()` plots two quality measures (cophenetic
+and silhouette) against the number of patterns K; K is chosen where they begin
+to drop. The K values in `params$npatterns.outgoing` (5) and
+`params$npatterns.incoming` (6) are the article's choices for its data, made by
+eye from these plots, so **review the two selectK PNGs and adjust the params
+for this input object** before relying on the patterns. This step is slow.
+
+```{r step1_10_outgoing_selectk}
+#-----------------------------------------------
+# STEP 1.10: Identify Global Communication Patterns
+#-----------------------------------------------
+# Identify outgoing communication patterns (how senders coordinate)
+
+# registerDoSEQ() forces NMF to run sequentially instead of spawning parallel worker to avoid errors
+registerDoSEQ()
+
+png(file.path(plot.dir.healthy, "11_selectK_outgoing.png"), width = 900, height = 700, res = params$plot.dpi)
+selectK(cellchat_healthy, pattern = "outgoing")
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.healthy, "11_selectK_outgoing.png"))
+```
+
+```{r step1_10_outgoing_patterns}
+# K=5 selected for outgoing (params$npatterns.outgoing; the article's choice)
+nPatterns <- params$npatterns.outgoing
+
+# registerDoSEQ() must be set again for the same reason
+registerDoSEQ()
+
+cellchat_healthy <- identifyCommunicationPatterns(
+  cellchat_healthy,
+  pattern   = "outgoing",
+  k         = nPatterns,
+  height    = 18
+)
+```
+
+```{r step1_10_outgoing_plots}
+png(file.path(plot.dir.healthy, "12_pattern_river_outgoing.png"), width = 1200, height = 900, res = params$plot.dpi)
+netAnalysis_river(cellchat_healthy, pattern = "outgoing")
+invisible(dev.off())
+
+png(file.path(plot.dir.healthy, "13_pattern_dot_outgoing.png"), width = 1200, height = 1050, res = params$plot.dpi)
+netAnalysis_dot(cellchat_healthy, pattern = "outgoing")
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "12_pattern_river_outgoing.png"))
+show_png(file.path(plot.dir.healthy, "13_pattern_dot_outgoing.png"))
+```
+
+```{r step1_10_incoming_selectk}
+# Repeat the same workflow for incoming patterns (receiver coordination)
+registerDoSEQ()
+
+png(file.path(plot.dir.healthy, "14_selectK_incoming.png"), width = 900, height = 700, res = params$plot.dpi)
+selectK(cellchat_healthy, pattern = "incoming")
+invisible(dev.off())
+# ADDED: show the saved plot
+show_png(file.path(plot.dir.healthy, "14_selectK_incoming.png"))
+```
+
+```{r step1_10_incoming_patterns}
+# Review plots/healthy/14_selectK_incoming.png before setting nPatterns.
+# (params$npatterns.incoming; the article's choice is 6)
+nPatterns <- params$npatterns.incoming
+
+registerDoSEQ()
+
+cellchat_healthy <- identifyCommunicationPatterns(
+  cellchat_healthy,
+  pattern   = "incoming",
+  k         = nPatterns,
+  height    = 18
+)
+```
+
+```{r step1_10_incoming_plots}
+png(file.path(plot.dir.healthy, "15_pattern_river_incoming.png"), width = 1200, height = 900, res = params$plot.dpi)
+netAnalysis_river(cellchat_healthy, pattern = "incoming")
+invisible(dev.off())
+
+png(file.path(plot.dir.healthy, "16_pattern_dot_incoming.png"), width = 1200, height = 1050, res = params$plot.dpi)
+netAnalysis_dot(cellchat_healthy, pattern = "incoming")
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "15_pattern_river_incoming.png"))
+show_png(file.path(plot.dir.healthy, "16_pattern_dot_incoming.png"))
+```
+
+## Identify functionally similar signaling pathways
+
+`netEmbedding()` uses Python UMAP (umap-learn) through reticulate; see the
+Python environment set up at the top of this notebook.
+
+```{r step1_11_similarity}
+#-----------------------------------------------
+# STEP 1.11: Identify Functionally Similar Signaling Pathways
+#-----------------------------------------------
+# Group pathways by functional similarity (similar sender-receiver structures)
+cellchat_healthy <- computeNetSimilarity(cellchat_healthy, type = "functional")
+cellchat_healthy <- netEmbedding(cellchat_healthy, type = "functional")
+
+options(future.rng.onMisuse = "ignore")
+cellchat_healthy <- netClustering(cellchat_healthy, type = "functional")
+
+# Visualize pathway groups in 2D embedding
+png(file.path(plot.dir.healthy, "17_pathway_functional_embedding.png"), width = 1050, height = 900, res = params$plot.dpi)
+netVisual_embedding(cellchat_healthy, type = "functional", label.size = 3.5)
+invisible(dev.off())
+
+png(file.path(plot.dir.healthy, "18_pathway_functional_embedding_zoom.png"), width = 1050, height = 900, res = params$plot.dpi)
+netVisual_embeddingZoomIn(cellchat_healthy, type = "functional", nCol = 2)
+invisible(dev.off())
+
+# ADDED: show the saved plots
+show_png(file.path(plot.dir.healthy, "17_pathway_functional_embedding.png"))
+show_png(file.path(plot.dir.healthy, "18_pathway_functional_embedding_zoom.png"))
+```
+
+## Save the Healthy CellChat object
+
+```{r step1_12_save}
+#-----------------------------------------------
+# STEP 1.12: Save the Healthy CellChat Object
+#-----------------------------------------------
+# Save for use in comparative analysis (Part 2)
+# ADDED: hand-off to parts 2 and 3 (file name kept from the article, now under results/)
+saveRDS(cellchat_healthy, file = file.path(cc.dir, "results/cellchat_Healthy.rds"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut9_cellchat_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut9_cellchat_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

@@ -1,0 +1,403 @@
+---
+title: "ngs101_scRNAseq_walkthrough_7-2 - Trajectory analysis with Slingshot"
+subtitle: "part 2 - run Slingshot on the T/NK lineage, extract lineages and pseudotime, visualize"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  traj.subdir: "trajectory_slingshot" # output subdirectory under base.dir (same as part 1)
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  cluster.col: "seurat_clusters" # metadata column with cluster IDs, used as Slingshot clusterLabels
+  condition.col: "condition" # metadata column with condition labels
+  start.celltype: "CD4+ T cells" # cell type whose enriched clusters are listed as candidate start clusters
+  start.min_cells: 100 # a cluster counts as enriched for start.celltype above this many cells
+  sling.start_clus: "" # start cluster label; empty = auto-detect (article default)
+  sling.end_clus: "" # end cluster label(s), comma-separated; empty = auto-detect
+  sling.allow_breaks: false # slingshot allow.breaks
+  sling.extend: "n" # slingshot extend ("y", "n" or "pc1")
+  sling.reweight: true # slingshot reweight: refit curves after initial fit
+  sling.reassign: true # slingshot reassign: reassign cells to best-fit curves
+  plot.dpi: 300 # ggsave / png resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-7-2-trajectory-analysis-using-slingshot/>
+
+Part 2 of 3. Slingshot is run on the T/NK `SingleCellExperiment` from part 1,
+using the UMAP embedding and Seurat clusters. The result is a set of
+**lineages** (ordered paths through clusters), one **principal curve** per
+lineage, a **pseudotime** per cell per lineage (`NA` for cells not on a lineage),
+and **weights** (how strongly each cell belongs to each lineage).
+
+Each lineage has its own pseudotime scale. A single "consensus" pseudotime per
+cell is built here from the lineage with the highest weight (the article's
+"Strategy 1"); because the lineages share a trunk but have different lengths,
+this single value is a convenience for plotting and correlation, not an exact
+common clock.
+
+Code is taken from the source article's code blocks (steps 7-10). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core trajectory analysis
+library(slingshot)
+library(SingleCellExperiment)
+library(princurve)
+library(TrajectoryUtils)
+
+# Single-cell analysis infrastructure
+library(Seurat)
+library(SeuratObject)
+
+# Data manipulation
+library(dplyr)
+library(tidyr)
+
+# Visualization
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+library(scales)
+library(grDevices)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_7-2_trajectory_slingshot/tut7-2_trajectory_slingshot_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+traj.dir <- file.path(base.dir, params$traj.subdir)
+
+# Create organized output directories
+for (d in c("plots/trajectories", "plots/pseudotime", "results")) {
+  if (!dir.exists(file.path(traj.dir, d))) dir.create(file.path(traj.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names from params
+celltype.col <- params$celltype.col
+cluster.col <- params$cluster.col
+condition.col <- params$condition.col
+```
+
+## Load objects from part 1
+
+```{r step2_load_obj}
+# ADDED: hand-off from part 1
+sce <- readRDS(file.path(traj.dir, "results/sce_T_NK.rds"))
+cat("SCE: ", ncol(sce), " cells, ", nrow(sce), " genes; reductions: ",
+    paste(reducedDimNames(sce), collapse = ", "), "\n", sep = "")
+```
+
+## Run Slingshot trajectory inference on the T/NK lineage
+
+```{r step3_slingshot}
+#-----------------------------------------------
+# STEP 7: Run Slingshot trajectory inference on T/NK lineage
+#-----------------------------------------------
+
+# First, examine cluster composition to identify start cluster
+cat("Cluster composition in T/NK lineage:\n")
+cluster_celltype_table <- table(colData(sce)[[cluster.col]], colData(sce)[[celltype.col]])
+print(cluster_celltype_table)
+cat("\n")
+
+# Identify cluster(s) enriched for CD4+ T cells (likely contains naive populations)
+stopifnot(params$start.celltype %in% colnames(cluster_celltype_table))
+cd4_per_cluster <- cluster_celltype_table[, params$start.celltype]
+cd4_enriched_clusters <- names(cd4_per_cluster)[cd4_per_cluster > params$start.min_cells]
+
+cat("Clusters enriched for ", params$start.celltype, " (>", params$start.min_cells, " cells):\n", sep = "")
+print(cd4_enriched_clusters)
+cat("\n")
+
+# For this tutorial, we'll let Slingshot auto-detect OR you can manually specify
+# If you want manual control, set params$sling.start_clus to a CD4+ enriched cluster
+# NOTE: the article's own printed result auto-detects a start at cluster 8,
+# which is a CD8+ T cell cluster, not one of the CD4+ enriched clusters above
+start.clus <- if (nzchar(params$sling.start_clus)) params$sling.start_clus else NULL
+end.clus <- if (nzchar(params$sling.end_clus)) trimws(strsplit(params$sling.end_clus, ",")[[1]]) else NULL
+
+cat("Running Slingshot trajectory inference...\n")
+cat("  Using: UMAP coordinates\n")
+cat("  Clustering: Seurat clusters\n")
+cat("  Start:", if (is.null(start.clus)) "Auto-detect (or manually specify CD4+ T cell cluster)" else start.clus, "\n")
+cat("  End:", if (is.null(end.clus)) "Auto-detect (likely NK cell clusters)" else paste(end.clus, collapse = ", "), "\n\n")
+
+# Run Slingshot
+sce <- slingshot(
+  sce,
+  clusterLabels = cluster.col,         # Use Seurat cluster assignments
+  reducedDim = "UMAP",                 # Use UMAP coordinates
+  start.clus = start.clus,             # Auto-detect OR specify cluster number
+  end.clus = end.clus,                 # Auto-detect terminal clusters
+  allow.breaks = params$sling.allow_breaks, # Don't allow gaps in lineages
+  extend = params$sling.extend,        # Don't extend curves beyond data
+  reweight = params$sling.reweight,    # Refit curves after initial fit
+  reassign = params$sling.reassign     # Reassign cells to best-fit curves
+)
+
+cat("Slingshot trajectory inference complete!\n\n")
+
+# Quick validation: Check if trajectory makes biological sense
+lineages <- slingLineages(sce)
+cat("Number of lineages detected:", length(lineages), "\n")
+
+for (i in seq_along(lineages)) {
+  cat("Lineage", i, ":", paste(lineages[[i]], collapse = " → "), "\n")
+}
+```
+
+## Lineages, principal curves and pseudotime
+
+```{r step4_extract}
+#-----------------------------------------------
+# STEP 8: Extract and examine Slingshot results for T/NK lineage
+#-----------------------------------------------
+
+# Extract lineages (cluster-level trajectories)
+lineages <- slingLineages(sce)
+
+cat("=== Slingshot Lineages for T/NK Cells ===\n")
+cat("Number of lineages detected:", length(lineages), "\n\n")
+
+for (i in seq_along(lineages)) {
+  cat("Lineage", i, ":", paste(lineages[[i]], collapse = " → "), "\n")
+}
+cat("\n")
+
+# Extract curves (cell-level fitted principal curves)
+curves <- slingCurves(sce)
+cat("Number of principal curves fit:", length(curves), "\n\n")
+
+# Extract pseudotime (one column per lineage)
+pseudotime_matrix <- slingPseudotime(sce)
+cat("Pseudotime matrix dimensions:", dim(pseudotime_matrix), "\n")
+cat("  (Rows = cells, Columns = lineages)\n\n")
+
+# Extract cell weights (probability of belonging to each lineage)
+curve_weights <- slingCurveWeights(sce)
+cat("Cell weights dimensions:", dim(curve_weights), "\n")
+cat("  (Rows = cells, Columns = lineages)\n")
+cat("  Weight = probability cell belongs to lineage\n\n")
+
+# Summary statistics per lineage
+for (i in seq_along(lineages)) {
+  pt <- pseudotime_matrix[, i]
+  cat("Lineage", i, "pseudotime:\n")
+  cat("  Range:", round(range(pt, na.rm = TRUE), 2), "\n")
+  cat("  Cells assigned:", sum(!is.na(pt)), "\n")
+  cat("  Median:", round(median(pt, na.rm = TRUE), 2), "\n\n")
+}
+```
+
+## Create consensus pseudotime for T/NK cells
+
+```{r step5_consensus}
+#-----------------------------------------------
+# STEP 9: Create consensus pseudotime for T/NK cells
+#-----------------------------------------------
+
+# Strategy 1: Use primary lineage (highest weight)
+primary_lineage <- apply(curve_weights, 1, which.max)
+sce$primary_lineage <- paste0("Lineage_", primary_lineage)
+
+# Extract pseudotime from primary lineage for each cell
+sce$slingshot_pseudotime <- sapply(1:ncol(sce), function(i) {
+  lineage <- primary_lineage[i]
+  pseudotime_matrix[i, lineage]
+})
+
+cat("Primary pseudotime assignment for T/NK cells:\n")
+cat("  Cells per lineage:\n")
+print(table(sce$primary_lineage))
+cat("\n")
+
+cat("Pseudotime summary (primary lineage method):\n")
+cat("  Range:", round(range(sce$slingshot_pseudotime, na.rm = TRUE), 2), "\n")
+cat("  Median:", round(median(sce$slingshot_pseudotime, na.rm = TRUE), 2), "\n\n")
+
+# Pseudotime by cell type
+pseudotime_by_type <- data.frame(
+  pseudotime = sce$slingshot_pseudotime,
+  cell_type = colData(sce)[[celltype.col]],
+  lineage = sce$primary_lineage,
+  condition = colData(sce)[[condition.col]]
+)
+
+cat("Median pseudotime by cell type (T/NK lineage):\n")
+summary_stats <- pseudotime_by_type %>%
+  group_by(cell_type) %>%
+  summarise(
+    median_pt = median(pseudotime, na.rm = TRUE),
+    mean_pt = mean(pseudotime, na.rm = TRUE),
+    n_cells = n()
+  ) %>%
+  arrange(median_pt)
+
+print(as.data.frame(summary_stats))
+```
+
+## Visualize T/NK trajectories
+
+```{r step6_visualize, fig.width = 16, fig.height = 12}
+#-----------------------------------------------
+# STEP 10: Visualize Slingshot trajectories for T/NK lineage
+#-----------------------------------------------
+
+# Extract UMAP coordinates and trajectory data
+umap_df <- data.frame(
+  UMAP1 = reducedDim(sce, "UMAP")[, 1],
+  UMAP2 = reducedDim(sce, "UMAP")[, 2],
+  pseudotime = sce$slingshot_pseudotime,
+  cell_type = colData(sce)[[celltype.col]],
+  condition = colData(sce)[[condition.col]],
+  cluster = colData(sce)[[cluster.col]],
+  lineage = sce$primary_lineage
+)
+
+# Plot 1: Slingshot curves on T/NK cells
+curves.png <- file.path(traj.dir, "plots/trajectories/02_slingshot_T_NK_curves.png")
+png(curves.png,
+    width = 10, height = 8, units = "in", res = params$plot.dpi)
+
+plot(reducedDim(sce, "UMAP"),
+     col = scales::alpha(as.numeric(factor(colData(sce)[[celltype.col]])), 0.5),
+     pch = 16, cex = 0.5,
+     xlab = "UMAP 1", ylab = "UMAP 2",
+     main = "Slingshot Trajectory: T/NK Cell Lineage")
+
+lines(SlingshotDataSet(sce), lwd = 3, col = "black", type = "lineages")
+
+legend("topright",
+       legend = levels(factor(colData(sce)[[celltype.col]])),
+       col = 1:length(levels(factor(colData(sce)[[celltype.col]]))),
+       pch = 16, cex = 0.8, bty = "n")
+
+dev.off()
+
+# Plot 2: Pseudotime gradient
+p_pseudotime <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = pseudotime)) +
+  geom_point(size = 1, alpha = 0.7) +
+  scale_color_viridis(option = "plasma", name = "Pseudotime") +
+  labs(title = "T/NK Lineage: Slingshot Pseudotime",
+       x = "UMAP 1", y = "UMAP 2") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Plot 3: Cell types
+p_celltype <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = cell_type)) +
+  geom_point(size = 1, alpha = 0.7) +
+  labs(title = "T/NK Cell Types",
+       x = "UMAP 1", y = "UMAP 2") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Plot 4: Lineage assignment
+p_lineage <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = lineage)) +
+  geom_point(size = 1, alpha = 0.7) +
+  scale_color_brewer(palette = "Set2") +
+  labs(title = "Lineage Assignment",
+       x = "UMAP 1", y = "UMAP 2") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Combine plots
+p_overview <- (p_pseudotime | p_celltype) / (p_lineage | plot_spacer())
+print(p_overview)
+
+ggsave(file.path(traj.dir, "plots/trajectories/03_slingshot_T_NK_overview.png"),
+       p_overview, width = 16, height = 12, dpi = params$plot.dpi)
+
+# Violin plot
+p_violin <- ggplot(umap_df, aes(x = reorder(cell_type, pseudotime, median),
+                                 y = pseudotime, fill = cell_type)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.shape = NA) +
+  coord_flip() +
+  labs(title = "Pseudotime Distribution by Cell Type (T/NK Lineage)",
+       x = "Cell Type", y = "Pseudotime") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "none")
+print(p_violin)
+
+ggsave(file.path(traj.dir, "plots/pseudotime/04_pseudotime_by_celltype_T_NK.png"),
+       p_violin, width = 10, height = 6, dpi = params$plot.dpi)
+```
+
+The base-graphics plot of the lineages over the UMAP (saved by the chunk above):
+
+```{r step6b_show_curves, out.width = "80%"}
+# ADDED: show the base-graphics PNG saved above in the rendered notebook
+knitr::include_graphics(normalizePath(curves.png))
+```
+
+## Save objects for part 3
+
+```{r step7_save}
+# ADDED: hand-off to part 3
+saveRDS(sce, file.path(traj.dir, "results/sce_T_NK_slingshot.rds"))
+save(curve_weights, umap_df, file = file.path(traj.dir, "results/slingshot_part2.RData"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut7-2_slingshot_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut7-2_slingshot_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

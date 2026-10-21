@@ -1,0 +1,528 @@
+---
+title: "ngs101_scRNAseq_walkthrough_12 - Gene co-expression networks with hdWGCNA"
+subtitle: "part 2 - construct the network, module eigengenes, hub genes, enrichment, differential modules"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  wgcna.subdir: "coexpression_hdwgcna" # output subdirectory under base.dir (same as part 1)
+  seed: 42 # random seed
+  n.threads: 4 # WGCNA threads (number of CPU cores to use)
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "orig.ident" # metadata column with sample IDs, used for Harmony correction of eigengenes
+  condition.col: "condition" # metadata column with condition labels
+  target.celltype: "Classical Monocytes" # the cell type the network is built for (same as part 1)
+  wgcna.name: "Mono_WGCNA" # hdWGCNA instance name (same as part 1)
+  expr.assay: "RNA" # assay holding the expression data
+  soft.power: 6 # soft-thresholding power, chosen from the part 1 plot/table (article uses 6)
+  network.type: "signed" # WGCNA network type
+  tom.type: "signed" # topological overlap matrix type
+  min.module.size: 30 # minimum number of genes required to form a module
+  merge.cut.height: 0.25 # modules with < 25% dissimilarity are merged
+  umap.reduction: "umap.cca" # UMAP reduction used for module feature plots
+  hub.n: 10 # hub genes per module in the GetHubGenes table
+  kme.ncol: 5 # columns in the kME distribution plot grid
+  module.plot.ncol: 4 # columns in the eigengene / module score UMAP grids
+  score.n_genes: 25 # top hub genes per module used for UCell scoring
+  score.method: "UCell" # module scoring method
+  run.enrichr: false # TRUE = run Enrichr (needs internet access)
+  enrichr.dbs: ["GO_Biological_Process_2023", "KEGG_2021_Human"] # Enrichr databases
+  enrichr.max_genes: 100 # genes per module used for enrichment
+  enrichr.n_terms: 10 # top terms per module in the bar plots
+  enrichr.plot_width: 5 # Enrichr bar plot width in inches
+  enrichr.plot_height: 7 # Enrichr bar plot height in inches
+  dme.group1: "Healthy" # condition for barcodes1 (positive log2FC = higher in this group)
+  dme.group2: "Post_Treatment" # condition for barcodes2
+  dme.test: "wilcox" # FindDMEs test.use
+  net.n_hubs: 3 # hub genes per module in HubGeneNetworkPlot
+  net.n_other: 5 # additional non-hub genes per module in HubGeneNetworkPlot
+  net.edge_prop: 0.75 # proportion of strongest edges displayed in HubGeneNetworkPlot
+  net.mods: "all" # modules shown in HubGeneNetworkPlot
+  modumap.n_hubs: 10 # hub genes per module defining the module UMAP layout
+  modumap.n_neighbors: 15 # UMAP n_neighbors
+  modumap.min_dist: 0.1 # UMAP min_dist
+  modumap.edge_prop: 0.05 # proportion of strongest gene-gene edges shown in ModuleUMAPPlot
+  modumap.label_hubs: 5 # hub genes labelled per module
+  future.maxsize.gb: 8 # future.globals.maxSize in GiB (HubGeneNetworkPlot)
+  plot.dpi: 300 # png resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-12-build-gene-co-expression-networks-using-hdwgcna/>
+
+Part 2 of 2. Starting from the metacell object prepared in part 1, this
+notebook builds the signed co-expression network at the chosen soft power
+(`params$soft.power`), cuts the gene dendrogram into modules, computes module
+eigengenes (Harmony-corrected across samples) and intramodular connectivity
+(kME) to find hub genes, scores modules per cell with UCell, runs Enrichr
+(optional, needs internet), tests differential module eigengenes between two
+conditions, and draws hub-gene network and module UMAP plots. Results are saved
+as a Seurat object and CSV files.
+
+**Input:** `results/seurat_wgcna_prenetwork.rds` written by part 1 (itself
+derived from `seurat_subset_downsampled.rds`, created by tutorial 7 part 1,
+which must be run first).
+
+Code is taken from the source article's code blocks (steps 6-14). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments. Note: the article's step headings are partly mislabelled
+(several code blocks sit under the previous step's heading and there is no
+"Step 9" code block); the `# STEP` banners here follow the article's h2/h3
+headings.
+
+## Libraries and data
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load Libraries and Data (from part 1)
+#-----------------------------------------------
+library(hdWGCNA)
+library(WGCNA)
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(igraph)
+library(enrichR)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_12_coexpression_hdwgcna/tut12_coexpression_hdwgcna_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+base.dir <- params$base.dir
+wgcna.dir <- file.path(base.dir, params$wgcna.subdir)
+for (d in c("plots", "results")) {
+  dir.create(file.path(wgcna.dir, d), recursive = TRUE, showWarnings = FALSE)
+}
+
+set.seed(params$seed)
+
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+target.celltype <- params$target.celltype
+
+# Enable multi-threading for WGCNA correlation computations
+enableWGCNAThreads(nThreads = params$n.threads)
+
+# ADDED: hand-off from part 1
+prenet.path <- file.path(wgcna.dir, "results/seurat_wgcna_prenetwork.rds")
+if (!file.exists(prenet.path)) stop("Run part 1 first: ", prenet.path, " not found.")
+seurat_obj <- readRDS(prenet.path)
+
+# ADDED: checks on what part 2 needs
+stopifnot(all(c(celltype.col, sample.col, condition.col) %in%
+                colnames(seurat_obj@meta.data)),
+          params$umap.reduction %in% Reductions(seurat_obj),
+          target.celltype %in% as.character(seurat_obj[[celltype.col]][, 1]),
+          all(c(params$dme.group1, params$dme.group2) %in%
+                as.character(seurat_obj[[condition.col]][, 1])))
+
+soft_power <- params$soft.power
+```
+
+## Construct the co-expression network
+
+```{r step6_network}
+#-----------------------------------------------
+# STEP 6: Construct the Co-expression Network
+#-----------------------------------------------
+seurat_obj <- ConstructNetwork(
+  seurat_obj,
+  soft_power      = soft_power,
+  setDatExpr      = FALSE,                    # SetDatExpr was already called in part 1
+  networkType     = params$network.type,
+  TOMType         = params$tom.type,
+  minModuleSize   = params$min.module.size,   # Minimum number of genes required to form a module
+  mergeCutHeight  = params$merge.cut.height   # Modules with < 25% dissimilarity are merged together
+)
+```
+
+```{r step6_dendrogram}
+# PlotDendrogram uses base R graphics, not ggplot -- must use pdf() on HPC
+# (title derived from params; the article hard-codes "Classical Monocyte")
+dendro.title <- paste(target.celltype, "hdWGCNA Dendrogram")
+pdf(file.path(wgcna.dir, "plots/dendrogram.pdf"), width = 10, height = 5)
+PlotDendrogram(seurat_obj, main = dendro.title)
+invisible(dev.off())
+
+# ADDED: png twin so the plot shows in the rendered notebook
+dendro.png <- file.path(wgcna.dir, "plots/dendrogram.png")
+png(dendro.png, width = 10, height = 5, units = "in", res = params$plot.dpi)
+PlotDendrogram(seurat_obj, main = dendro.title)
+invisible(dev.off())
+```
+
+```{r step6_show_dendrogram, out.width = "90%"}
+# ADDED: show the base-graphics PNG saved above
+knitr::include_graphics(normalizePath(dendro.png))
+```
+
+## Compute module eigengenes
+
+```{r step7_eigengenes}
+#-----------------------------------------------
+# STEP 7: Compute Module Eigengenes
+#-----------------------------------------------
+# Scale features before computing eigengenes (required by PCA-based eigengene calculation)
+# Kept as in the article. NOTE: ScaleData on VariableFeatures only scales
+# those genes, while eigengenes are computed from the network genes; network
+# genes that are not variable features have no scaled values. The check below
+# only warns; it does not change the result.
+seurat_obj <- ScaleData(seurat_obj, features = VariableFeatures(seurat_obj))
+
+# ADDED: warn if many network genes are missing from the scaled data
+scaled.genes <- tryCatch(
+  rownames(GetAssayData(seurat_obj, assay = params$expr.assay, layer = "scale.data")),
+  error = function(e) NULL
+)
+net.genes <- GetModules(seurat_obj, wgcna_name = params$wgcna.name)$gene_name
+if (!is.null(scaled.genes)) {
+  frac.scaled <- mean(net.genes %in% scaled.genes)
+  message(sprintf("%.1f%% of network genes are in the scaled data.", 100 * frac.scaled))
+  if (frac.scaled < 0.9) {
+    warning("Only ", round(100 * frac.scaled, 1), "% of network genes have scaled values; ",
+            "module eigengenes may use fewer genes than the network contains.")
+  }
+}
+
+# Compute module eigengenes on individual cells
+# group.by.vars enables Harmony correction of eigengenes across samples
+seurat_obj <- ModuleEigengenes(
+  seurat_obj,
+  group.by.vars = sample.col  # Harmonize across biological replicates
+)
+```
+
+## Compute intramodular connectivity (kME)
+
+```{r step8_kme}
+#-----------------------------------------------
+# STEP 8: Compute Intramodular Connectivity (kME)
+#-----------------------------------------------
+# Compute kME for all genes in their assigned modules
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  group.by   = celltype.col,
+  group_name = target.celltype
+)
+
+# Get the full module assignment table
+modules <- GetModules(seurat_obj, wgcna_name = params$wgcna.name)
+head(modules)
+
+# Get the top 10 hub genes from each module
+hub_df <- GetHubGenes(seurat_obj, n_hubs = params$hub.n)
+head(hub_df, 20)
+```
+
+## Visualize kME score distributions
+
+```{r step8b_kme_plot}
+# Plot the distribution of kME values across all modules
+# Each panel shows one module; genes with high kME are the hub genes
+p_kme <- PlotKMEs(seurat_obj, ncol = params$kme.ncol)
+ggsave(file.path(wgcna.dir, "plots/kme_distributions.pdf"), plot = p_kme, width = 14, height = 8)
+# ADDED: show the plot in the notebook
+print(p_kme)
+```
+
+## Plot harmonized module eigengenes on cells
+
+```{r step9_hme_umap, fig.width = 12, fig.height = 9}
+# Project harmonized module eigengenes onto the single-cell UMAP
+# Each panel shows the activity of one module across all cells
+plot_list_hme <- ModuleFeaturePlot(
+  seurat_obj,
+  features  = "hMEs",
+  order     = TRUE,
+  reduction = params$umap.reduction  # Specify the correct UMAP reduction name
+)
+
+# Verify plots were generated before saving -- stops early if ModuleFeaturePlot failed
+stopifnot(length(plot_list_hme) > 0)
+
+p_hme <- wrap_plots(plot_list_hme, ncol = params$module.plot.ncol)
+ggsave(file.path(wgcna.dir, "plots/module_eigengene_umap.pdf"), plot = p_hme, width = 16, height = 12)
+# ADDED: show the plot in the notebook
+print(p_hme)
+```
+
+## Module correlation heatmap
+
+```{r step9b_correlogram}
+# ModuleCorrelogram uses base R graphics -- must use pdf() on HPC
+pdf(file.path(wgcna.dir, "plots/module_correlogram.pdf"), width = 8, height = 7)
+ModuleCorrelogram(seurat_obj)
+invisible(dev.off())
+
+# ADDED: png twin so the plot shows in the rendered notebook
+correlogram.png <- file.path(wgcna.dir, "plots/module_correlogram.png")
+png(correlogram.png, width = 8, height = 7, units = "in", res = params$plot.dpi)
+ModuleCorrelogram(seurat_obj)
+invisible(dev.off())
+```
+
+```{r step9b_show_correlogram, out.width = "70%"}
+# ADDED: show the base-graphics PNG saved above
+knitr::include_graphics(normalizePath(correlogram.png))
+```
+
+## Compute and visualize single-cell module scores
+
+```{r step10_scores, fig.width = 12, fig.height = 9}
+#-----------------------------------------------
+# STEP 10: Compute and Visualize Single-Cell Module Scores
+#-----------------------------------------------
+# Compute module scores using the UCell algorithm
+# n_genes: number of top hub genes per module to use for scoring
+seurat_obj <- ModuleExprScore(
+  seurat_obj,
+  n_genes = params$score.n_genes,
+  method  = params$score.method
+)
+
+# Plot module scores on the UMAP
+plot_list_scores <- ModuleFeaturePlot(
+  seurat_obj,
+  features  = "scores",
+  order     = TRUE,
+  ucell     = TRUE,
+  reduction = params$umap.reduction  # Specify the correct UMAP reduction name
+)
+
+p_scores <- wrap_plots(plot_list_scores, ncol = params$module.plot.ncol)
+ggsave(file.path(wgcna.dir, "plots/module_scores_umap.pdf"), plot = p_scores, width = 16, height = 12)
+# ADDED: show the plot in the notebook
+print(p_scores)
+```
+
+## Functional enrichment analysis
+
+```{r step11_enrichr, eval = params$run.enrichr}
+#-----------------------------------------------
+# STEP 11: Functional Enrichment Analysis
+#-----------------------------------------------
+# ADDED: this chunk needs internet access (Enrichr web service); it only runs
+# when params$run.enrichr is TRUE.
+
+# Define the databases to query
+# Use the most up-to-date versions of GO and KEGG
+dbs <- unlist(params$enrichr.dbs)
+
+# Run enrichment analysis on all modules
+seurat_obj <- RunEnrichr(
+  seurat_obj,
+  dbs      = dbs,
+  max_genes = params$enrichr.max_genes  # Use up to 100 genes per module for enrichment
+)
+
+# Retrieve the full enrichment results table
+enrich_df <- GetEnrichrTable(seurat_obj)
+head(enrich_df)
+
+# Generate bar plots of the top enriched terms for each module
+# Plots are saved to the specified output directory
+# FIX/ADDED: output directory placed under the project directory
+enrichr.dir <- file.path(wgcna.dir, "enrichr_plots")
+dir.create(enrichr.dir, recursive = TRUE, showWarnings = FALSE)
+EnrichrBarPlot(
+  seurat_obj,
+  outdir     = enrichr.dir,
+  n_terms    = params$enrichr.n_terms,  # Show the top 10 enriched terms per module
+  plot_size  = c(params$enrichr.plot_width, params$enrichr.plot_height),  # Width x height in inches
+  logscale   = TRUE                     # Plot -log10(adjusted p-value) on the x-axis
+)
+```
+
+## Differential module eigengene (DME) analysis
+
+```{r step12_dme}
+#-----------------------------------------------
+# STEP 12: Differential Module Eigengene (DME) Analysis
+#-----------------------------------------------
+# Direct pairwise DME test: Healthy vs Post_Treatment
+# Positive log2FC = higher module activity in Healthy
+# Negative log2FC = higher module activity in Post_Treatment
+# NOTE (article logic, kept unchanged): this test uses ALL cells of the two
+# conditions, although the network was built on the target cell type only.
+# Consider restricting barcodes1/barcodes2 to cells of target.celltype
+# (e.g. also require seurat_obj[[celltype.col]] == target.celltype) so that
+# differences reflect that cell type rather than changes in cell composition.
+DMEs <- FindDMEs(
+  seurat_obj,
+  barcodes1  = colnames(seurat_obj)[seurat_obj[[condition.col]][, 1] == params$dme.group1],
+  barcodes2  = colnames(seurat_obj)[seurat_obj[[condition.col]][, 1] == params$dme.group2],
+  test.use   = params$dme.test,
+  wgcna_name = params$wgcna.name
+)
+
+# Inspect the results table
+# Columns: module, avg_ME, p_val, p_val_adj, log2FC
+head(DMEs)
+
+p_dme <- PlotDMEsVolcano(
+  seurat_obj,
+  DMEs       = DMEs,
+  wgcna_name = params$wgcna.name
+)
+
+ggsave(file.path(wgcna.dir, "plots/DME_volcano.pdf"), plot = p_dme, width = 8, height = 6)
+# ADDED: show the plot in the notebook
+print(p_dme)
+```
+
+## Hub gene network plot
+
+```{r step13_hubnet}
+# Plot a network graph of hub genes from all modules
+# n_hubs: number of hub genes per module to include
+# n_other: additional non-hub genes to include per module
+# edge_prop: proportion of edges to display (0.75 = top 75% strongest connections)
+# HubGeneNetworkPlot uses future.apply internally -- raise the globals size limit
+options(future.globals.maxSize = params$future.maxsize.gb * 1024^3)
+
+# HubGeneNetworkPlot renders directly to the graphics device -- use pdf() on HPC
+pdf(file.path(wgcna.dir, "plots/hub_gene_network.pdf"), width = 10, height = 10)
+HubGeneNetworkPlot(
+  seurat_obj,
+  n_hubs     = params$net.n_hubs,
+  n_other    = params$net.n_other,
+  edge_prop  = params$net.edge_prop,
+  mods       = params$net.mods
+)
+invisible(dev.off())
+
+# ADDED: png twin so the plot shows in the rendered notebook
+hubnet.png <- file.path(wgcna.dir, "plots/hub_gene_network.png")
+png(hubnet.png, width = 10, height = 10, units = "in", res = params$plot.dpi)
+HubGeneNetworkPlot(
+  seurat_obj,
+  n_hubs     = params$net.n_hubs,
+  n_other    = params$net.n_other,
+  edge_prop  = params$net.edge_prop,
+  mods       = params$net.mods
+)
+invisible(dev.off())
+```
+
+```{r step13_show_hubnet, out.width = "80%"}
+# ADDED: show the base-graphics PNG saved above
+knitr::include_graphics(normalizePath(hubnet.png))
+```
+
+## Gene co-expression network UMAP
+
+```{r step13b_modumap}
+# Build a UMAP representation of the gene co-expression network
+# n_hubs: number of hub genes per module used to define the UMAP layout
+seurat_obj <- RunModuleUMAP(
+  seurat_obj,
+  n_hubs      = params$modumap.n_hubs,
+  n_neighbors = params$modumap.n_neighbors,
+  min_dist    = params$modumap.min_dist
+)
+
+# Plot the gene network UMAP with ModuleUMAPPlot
+# edge_prop = 0.05: show only the top 5% strongest gene-gene connections for clarity
+# ModuleUMAPPlot renders directly to the graphics device -- use pdf() on HPC
+pdf(file.path(wgcna.dir, "plots/gene_network_umap.pdf"), width = 10, height = 9)
+ModuleUMAPPlot(
+  seurat_obj,
+  edge_prop        = params$modumap.edge_prop,
+  label_hubs       = params$modumap.label_hubs,
+  keep_grey_edges  = FALSE
+)
+invisible(dev.off())
+
+# ADDED: png twin so the plot shows in the rendered notebook
+modumap.png <- file.path(wgcna.dir, "plots/gene_network_umap.png")
+png(modumap.png, width = 10, height = 9, units = "in", res = params$plot.dpi)
+ModuleUMAPPlot(
+  seurat_obj,
+  edge_prop        = params$modumap.edge_prop,
+  label_hubs       = params$modumap.label_hubs,
+  keep_grey_edges  = FALSE
+)
+invisible(dev.off())
+```
+
+```{r step13b_show_modumap, out.width = "80%"}
+# ADDED: show the base-graphics PNG saved above
+knitr::include_graphics(normalizePath(modumap.png))
+```
+
+## Save your results
+
+```{r step14_save}
+#-----------------------------------------------
+# STEP 14: Save Your Results
+#-----------------------------------------------
+# Save the Seurat object with all hdWGCNA results embedded
+saveRDS(seurat_obj, file.path(wgcna.dir, "results/seurat_hdwgcna.rds"))
+
+# Export the module assignment table as a CSV
+write.csv(modules, file.path(wgcna.dir, "results/monocyte_modules.csv"), row.names = FALSE)
+
+# Export hub genes
+write.csv(hub_df, file.path(wgcna.dir, "results/monocyte_hub_genes.csv"), row.names = FALSE)
+
+# Export DME results
+write.csv(DMEs, file.path(wgcna.dir, "results/monocyte_DMEs.csv"), row.names = FALSE)
+
+# Export enrichment results
+# ADDED: only available when the Enrichr chunk was run (params$run.enrichr)
+if (exists("enrich_df")) {
+  write.csv(enrich_df, file.path(wgcna.dir, "results/monocyte_enrichment.csv"), row.names = FALSE)
+} else {
+  message("Enrichr was not run (params$run.enrichr is FALSE); skipping monocyte_enrichment.csv")
+}
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut12_hdwgcna_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut12_hdwgcna_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

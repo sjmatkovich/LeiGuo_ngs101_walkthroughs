@@ -1,0 +1,652 @@
+---
+title: "ngs101_scRNAseq_walkthrough_10 - Cell-cell communication analysis using NicheNet"
+subtitle: "part 2 - ligand activity plots, targets, receptors, sender cells, prioritization, signaling paths, circos plot"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  nichenet.subdir: "cell_communication_nichenet" # output subdirectory under base.dir (same as part 1)
+  model.cache.dir: "" # folder with the NicheNet prior models downloaded in part 1; empty = base.dir/nichenet_models
+  model.local.names: ["lr_network_human.rds", "ligand_target_matrix_human.rds", "weighted_networks_human.rds", "ligand_tf_matrix_human.rds"] # local file names in the cache folder (same as part 1)
+  seed: 42 # random seed
+  assay: "RNA" # assay holding normalized data
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  condition.col: "condition" # metadata column with condition labels
+  target.top_n: 250 # top target genes considered per ligand (Step 9)
+  target.cutoff: 0.3333333 # regulatory potential cutoff for the ligand-target heatmap (article: 1/3; YAML cannot evaluate 1/3)
+  lr.order_hclust: "both" # ligand-receptor heatmap clustering: "both", "ligands", "receptors" or "none"
+  prioritization.scenario: "case_control" # scenario for generate_prioritization_tables (Step 12)
+  signaling.top_regulators: 4 # top_n_regulators for the signaling path (Step 13)
+  signaling.minmax_scaling: true # normalise edge weights of the signaling path
+  circos.top_targets: 5 # top target genes per ligand drawn in the circos plot
+  circos.celltypes: ["CD8+ T cells", "NK cells", "B cells", "Classical Monocytes", "Monocytes", "T cells"] # sender cell types with a fixed circos color, in the same order as circos.palette
+  circos.palette: ["#E41A1C", "#377EB8", "#4DAF4A", "#FF7F00", "#F781BF", "#984EA3"] # circos colors for each of circos.celltypes
+  circos.default.color: "grey80" # color of target genes and of senders not listed in circos.celltypes
+  circos.transparency: 0.4 # chord transparency
+  circos.label.cex: 0.65 # sector label size
+  bar.fill: "steelblue" # ligand activity bar color
+  target.heatmap.color: "purple" # ligand-target heatmap color
+  lr.heatmap.color: "mediumvioletred" # ligand-receptor heatmap color
+  sender.heatmap.colors: ["white", "firebrick3"] # low / high colors of the ligand-by-sender heatmap
+  graph.node.color: "steelblue" # signaling path node color
+  graph.edge.color: "grey50" # signaling path edge color
+  plot.dpi: 300 # png resolution (circos twin)
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-10-cell-cell-communication-analysis-using-nichenet/>
+
+Part 2 of 2. Using the top ligands from part 1, this notebook visualizes the
+ligand activities, predicts the target genes and the receptors of the top
+ligands, shows which sender cell types express them, optionally runs the
+extended multi-criteria prioritization (Step 12), traces a signaling path from
+the top ligand to its top target gene, assigns each top ligand to its most
+likely sender cell type and draws a circos plot of sender cell types and target
+genes.
+
+Part 1 must be run first (it requires tutorial 7 part 1 for its input object).
+Part 2 reads `results/nichenet_part1_state.RData` and
+`results/seurat_nichenet_input.rds` written by part 1 and reloads the prior
+models from the cache folder.
+
+Step 12 (extended prioritization) uses nichenetr functions
+(`process_table_to_ic()`, `generate_prioritization_tables()`) exactly as in the
+article; their signatures differ between nichenetr versions, so the step is
+wrapped in `tryCatch()` and, if it fails, the error is printed and the rest of
+the notebook still runs.
+
+Code is taken from the source article's code blocks (steps 8-15). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# Load libraries (as in STEP 1 of part 1)
+#-----------------------------------------------
+library(nichenetr)
+library(Seurat)
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(igraph)
+library(ggraph)
+library(patchwork)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_10_cell_communication_nichenet/tut10_cell_communication_nichenet_part2.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Working directories
+base.dir <- params$base.dir
+nichenet.dir <- file.path(base.dir, params$nichenet.subdir)
+plot.dir <- file.path(nichenet.dir, "plots/nichenet")
+result.dir <- file.path(nichenet.dir, "results")
+for (d in c(plot.dir, result.dir)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+
+model.cache.dir <- if (nzchar(params$model.cache.dir)) path.expand(params$model.cache.dir) else file.path(base.dir, "nichenet_models")
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Column names from params
+celltype.col <- params$celltype.col
+condition.col <- params$condition.col
+
+cat("Environment setup complete!\n")
+cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
+cat("nichenetr version:", as.character(packageVersion("nichenetr")), "\n")
+```
+
+## Load objects from part 1
+
+```{r step2_load_obj}
+# ADDED: hand-off from part 1
+state.file <- file.path(result.dir, "nichenet_part1_state.RData")
+seurat.file <- file.path(result.dir, "seurat_nichenet_input.rds")
+stopifnot(file.exists(state.file), file.exists(seurat.file))
+load(state.file)
+seurat_obj <- readRDS(seurat.file)
+Idents(seurat_obj) <- seurat_obj[[celltype.col, drop = TRUE]]
+
+# Prior models (cached by part 1)
+model.paths <- file.path(model.cache.dir, unlist(params$model.local.names))
+stopifnot(all(file.exists(model.paths)))
+ligand_target_matrix <- readRDS(file.path(model.cache.dir, "ligand_target_matrix_human.rds"))
+weighted_networks    <- readRDS(file.path(model.cache.dir, "weighted_networks_human.rds"))
+
+cat("Receiver:", receiver, "\n")
+cat("Senders:", paste(sender_celltypes, collapse = ", "), "\n")
+cat("Comparison:", condition_oi, "vs", condition_reference, "\n")
+cat("Top ligands:", length(best_upstream_ligands), "\n")
+```
+
+## Visualize ligand activity scores
+
+```{r step8_activity_barplots, fig.width = 12, fig.height = 6}
+#-----------------------------------------------
+# STEP 8: Visualize Ligand Activity Scores
+#-----------------------------------------------
+# Helper to build a bar plot for one set of ligand activities
+plot_ligand_activity <- function(ligand_activities_df, top_ligands, subtitle) {
+  ligand_activities_df %>%
+    filter(test_ligand %in% top_ligands) %>%
+    mutate(test_ligand = factor(test_ligand, levels = rev(top_ligands))) %>%
+    ggplot(aes(x = test_ligand, y = aupr_corrected)) +
+    geom_bar(stat = "identity", fill = params$bar.fill) +
+    coord_flip() +
+    labs(
+      title    = "NicheNet Ligand Activity Scores",
+      subtitle = subtitle,
+      x        = "Ligand",
+      y        = "Corrected AUPR"
+    ) +
+    theme_classic()
+}
+
+p_agnostic <- plot_ligand_activity(
+  ligand_activities_agnostic,
+  best_upstream_ligands_agnostic,
+  paste0("Top ", top_n, " ligands — sender-agnostic")
+)
+
+p_focused <- plot_ligand_activity(
+  ligand_activities_focused,
+  best_upstream_ligands_focused,
+  paste0("Top ", top_n, " ligands — sender-focused")
+)
+
+ggsave(file.path(plot.dir, "ligand_activity_barplot.pdf"),
+       plot = p_agnostic + p_focused, width = 12, height = 6)
+# ADDED: show the plot in the notebook
+print(p_agnostic + p_focused)
+```
+
+## Predict target genes of top ligands
+
+```{r step9_ligand_targets, fig.width = 10, fig.height = 8}
+#-----------------------------------------------
+# STEP 9: Predict Target Genes of Top Ligands
+#-----------------------------------------------
+# Define a regulatory potential cutoff
+# get_weighted_ligand_target_links extracts the top target genes
+# for each ligand above a given threshold
+active_ligand_target_links_df <- best_upstream_ligands %>%
+  lapply(get_weighted_ligand_target_links,
+         geneset              = geneset_oi,
+         ligand_target_matrix = ligand_target_matrix,
+         n                    = params$target.top_n) %>%  # consider top 250 targets per ligand
+  bind_rows() %>%
+  drop_na()
+
+# Convert to a wide matrix for heatmap visualization.
+# cutoff = 1/3 retains only weights above the 33rd percentile;
+# prepare_ligand_target_visualization handles this filtering internally.
+active_ligand_target_links <- prepare_ligand_target_visualization(
+  ligand_target_df     = active_ligand_target_links_df,
+  ligand_target_matrix = ligand_target_matrix,
+  cutoff               = params$target.cutoff
+)
+
+# Order ligands by activity rank for consistent heatmap layout
+order_ligands <- intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>%
+  rev()
+order_targets <- active_ligand_target_links_df$target %>%
+  unique() %>%
+  intersect(rownames(active_ligand_target_links))
+
+# Generate the ligand-target heatmap
+vis_ligand_target <- active_ligand_target_links[order_targets, order_ligands]
+
+p_ligand_target_network <- vis_ligand_target %>%
+  make_heatmap_ggplot(
+    y_name    = paste0("Target genes in receiver (", receiver, ")"),  # receiver name from params
+    x_name    = "Prioritized ligands",
+    color     = params$target.heatmap.color,
+    legend_title = "Regulatory\npotential"
+  ) +
+  theme(axis.text.x = element_text(face = "italic"))
+
+ggsave(file.path(plot.dir, "ligand_target_heatmap.pdf"),
+       plot = p_ligand_target_network, width = 10, height = 8)
+# ADDED: show the plot in the notebook
+print(p_ligand_target_network)
+```
+
+## Infer receptors of top-ranked ligands
+
+```{r step10_ligand_receptors, fig.width = 10, fig.height = 7}
+#-----------------------------------------------
+# STEP 10: Infer Receptors of Top-Ranked Ligands
+#-----------------------------------------------
+# For each top ligand, identify receptors expressed in the receiver
+lr_network_top <- lr_network %>%
+  filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>%
+  distinct(from, to)
+
+# Build ligand-receptor score matrix using positional arguments
+ligand_receptor_links_df <- get_weighted_ligand_receptor_links(
+  best_upstream_ligands,
+  expressed_receptors,
+  lr_network,
+  weighted_networks$lr_sig
+)
+
+# Prepare wide matrix for heatmap; order_hclust clusters both rows and columns
+vis_ligand_receptor_network <- prepare_ligand_receptor_visualization(
+  ligand_receptor_links_df,
+  best_upstream_ligands,
+  order_hclust = params$lr.order_hclust
+)
+
+p_ligand_receptor_network <- t(vis_ligand_receptor_network) %>%
+  make_heatmap_ggplot(
+    y_name       = "Ligands",
+    x_name       = paste0("Receptors expressed in receiver (", receiver, ")"),  # receiver name from params
+    color        = params$lr.heatmap.color,
+    legend_title = "Prior interaction\npotential"
+  ) +
+  theme(axis.text.x = element_text(face = "italic"))
+
+ggsave(file.path(plot.dir, "ligand_receptor_heatmap.pdf"),
+       plot = p_ligand_receptor_network, width = 10, height = 7)
+# ADDED: show the plot in the notebook
+print(p_ligand_receptor_network)
+```
+
+## Identify which sender cell types express each top ligand
+
+```{r step11_ligand_sender, fig.width = 10, fig.height = 8}
+#-----------------------------------------------
+# STEP 11: Identify Which Sender Cell Types Express Each Top Ligand
+#-----------------------------------------------
+# For each sender cell type, check which top ligands it expresses
+# get_lfc_condition computes log fold-change between conditions for each cell type
+# Here we compute average expression of each ligand per sender cell type
+
+# Get average expression across all sender cells (combined conditions, for simplicity)
+# ADDED: the condition column name comes from params (the article's subset =
+# condition %in% ... hard-codes it), so the cells are selected explicitly.
+cells_oi_ref <- colnames(seurat_obj)[seurat_obj[[condition.col, drop = TRUE]] %in% c(condition_oi, condition_reference)]
+seurat_sender <- subset(seurat_obj,
+                        idents = sender_celltypes,
+                        cells  = cells_oi_ref)
+
+# Assign sender cell type as identity
+Idents(seurat_sender) <- seurat_sender[[celltype.col, drop = TRUE]]
+
+best_upstream_ligands <- intersect(best_upstream_ligands, rownames(seurat_sender))
+
+# Compute mean expression of top ligands per sender cell type
+# FIX: slot= is defunct in Seurat v5 AverageExpression(); layer= is used instead
+ligand_expression_matrix <- AverageExpression(
+  seurat_sender,
+  features  = best_upstream_ligands,
+  assay     = params$assay,
+  layer     = "data"  # log-normalized values
+)[[params$assay]]
+# ADDED: AverageExpression may return a sparse matrix; scale() needs a dense one
+ligand_expression_matrix <- as.matrix(ligand_expression_matrix)
+
+# Scale for visualization
+ligand_expression_scaled <- t(scale(t(ligand_expression_matrix)))
+# FIX: ligands with identical expression in all senders give NaN rows after
+# scaling, which make pheatmap's clustering fail; drop them
+nan_rows <- apply(ligand_expression_scaled, 1, function(x) any(is.nan(x)))
+if (any(nan_rows)) {
+  cat("Dropping", sum(nan_rows), "ligand(s) with no variation across senders:",
+      paste(rownames(ligand_expression_scaled)[nan_rows], collapse = ", "), "\n")
+  ligand_expression_scaled <- ligand_expression_scaled[!nan_rows, , drop = FALSE]
+}
+
+# Heatmap: which sender cell type expresses each top ligand?
+p_ligand_sender <- pheatmap::pheatmap(
+  mat              = ligand_expression_scaled[intersect(best_upstream_ligands, rownames(ligand_expression_scaled)), ],
+  color            = colorRampPalette(unlist(params$sender.heatmap.colors))(50),
+  cluster_cols     = TRUE,
+  cluster_rows     = TRUE,
+  fontsize_row     = 9,
+  fontsize_col     = 9,
+  main             = "Ligand Expression Across Sender Cell Types",
+  filename         = file.path(plot.dir, "ligand_sender_heatmap.pdf"),
+  width            = 10,
+  height           = 8
+)
+# ADDED: pheatmap(filename=) does not draw to the notebook; draw the returned gtable
+grid::grid.newpage()
+grid::grid.draw(p_ligand_sender$gtable)
+```
+
+## Extended prioritization (optional)
+
+```{r step12_prioritization}
+#-----------------------------------------------
+# STEP 12 (Optional): Extended Prioritization — Incorporating Expression and DE Information
+#-----------------------------------------------
+# ADDED: the whole step is wrapped in tryCatch(): the nichenetr functions used
+# here (process_table_to_ic(), generate_prioritization_tables(), get_exprs_avg())
+# have different signatures in different nichenetr versions. If it fails, the
+# message is printed and the notebook continues with Step 13. Objects are still
+# created in the global environment (tryCatch evaluates in the calling frame).
+tryCatch({
+  # Step 12a: Identify ligand and receptor genes present in lr_network
+  lr_network_filtered <- lr_network %>%
+    filter(from %in% potential_ligands_focused | to %in% expressed_receptors)
+
+  ligands_in_lr   <- unique(lr_network_filtered$from)
+  receptors_in_lr <- unique(lr_network_filtered$to)
+
+  # Restrict to genes that actually exist in the Seurat object.
+  all_genes_seurat  <- rownames(seurat_obj)
+  lr_features <- intersect(unique(c(ligands_in_lr, receptors_in_lr)), all_genes_seurat)
+
+  # Step 12b: Compute DE of all cell types vs all others, restricted to
+  # ligand/receptor genes only (reduces compute time considerably)
+  # Run on the condition of interest subset
+  cells_oi <- colnames(seurat_obj)[seurat_obj[[condition.col, drop = TRUE]] == condition_oi]
+  seurat_oi <- subset(seurat_obj, cells = cells_oi)  # condition column name from params
+  Idents(seurat_oi) <- seurat_oi[[celltype.col, drop = TRUE]]
+
+  DE_table <- FindAllMarkers(
+    seurat_oi,
+    features        = lr_features,
+    min.pct         = 0,
+    logfc.threshold = 0,
+    return.thresh   = 1   # keep all genes regardless of p-value
+  )
+
+  # Step 12c: Compute average expression per cell type in condition of interest
+  expression_info <- get_exprs_avg(
+    seurat_obj,
+    celltype_colname  = celltype.col,
+    condition_colname = condition.col,
+    condition_oi      = condition_oi,
+    features          = lr_features
+  )
+
+  # Step 12d: Compute condition-level DE (ligand/receptor upregulation by condition)
+  Idents(seurat_obj) <- seurat_obj[[condition.col, drop = TRUE]]
+  condition_markers <- FindMarkers(
+    seurat_obj,
+    ident.1         = condition_oi,
+    ident.2         = condition_reference,
+    features        = lr_features,
+    min.pct         = 0,
+    logfc.threshold = 0
+  ) %>%
+    rownames_to_column("gene")
+
+  # Step 12e: Format each table separately using process_table_to_ic().
+  # The function is called three times — once per table type:
+  #   "celltype_DE" : cell-type-level DE (FindAllMarkers output)
+  #   "expression"  : average expression per cell type
+  #   "group_DE"    : condition-level DE (FindMarkers output)
+  processed_DE_table <- process_table_to_ic(
+    DE_table,
+    table_type   = "celltype_DE",
+    lr_network_filtered,
+    senders_oi   = sender_celltypes,
+    receivers_oi = receiver
+  )
+
+  processed_expr_table <- process_table_to_ic(
+    expression_info,
+    table_type = "expression",
+    lr_network_filtered
+  )
+
+  processed_condition_markers <- process_table_to_ic(
+    condition_markers,
+    table_type = "group_DE",
+    lr_network_filtered
+  )
+
+  # Step 12f: Generate the multi-criteria prioritization table.
+  prioritized_tbl <- generate_prioritization_tables(
+    processed_expr_table,        # sender_receiver_info (average expression)
+    processed_DE_table,          # sender_receiver_de   (cell-type DE)
+    ligand_activities_focused,
+    processed_condition_markers, # lr_condition_de      (condition-level DE)
+    scenario = params$prioritization.scenario
+  )
+
+  # Save results
+  write.csv(prioritized_tbl, file.path(result.dir, "prioritized_lr_pairs.csv"), row.names = FALSE)
+  print(head(prioritized_tbl))
+}, error = function(e) {
+  message("Step 12 (extended prioritization) failed - likely a nichenetr version/signature difference: ",
+          conditionMessage(e))
+})
+```
+
+## Infer signaling paths from top ligands to target genes
+
+```{r step13_signaling_path, fig.width = 8, fig.height = 6}
+#-----------------------------------------------
+# STEP 13: Infer Signaling Paths from Top Ligands to Target Genes
+#-----------------------------------------------
+# Load the ligand-TF matrix — a prebuilt matrix (ligands x TFs) encoding
+ligand_tf_matrix <- readRDS(file.path(model.cache.dir, "ligand_tf_matrix_human.rds"))
+
+# Choose a top ligand to trace the signaling path
+top_ligand <- best_upstream_ligands_focused[1]
+
+# Choose the top predicted target gene for that ligand (from Step 9)
+top_target <- active_ligand_target_links_df %>%
+  filter(ligand == top_ligand) %>%
+  arrange(desc(weight)) %>%
+  slice(1) %>%
+  pull(target)
+
+# ADDED: check that a ligand and a target were found
+stopifnot(length(top_ligand) == 1, !is.na(top_ligand), length(top_target) == 1)
+cat("Signaling path from", top_ligand, "to", top_target, "\n")
+
+# Infer the signaling path from top_ligand to top_target
+sig_path <- get_ligand_signaling_path(
+  ligand_tf_matrix  = ligand_tf_matrix,
+  ligands_all       = top_ligand,
+  targets_all       = top_target,
+  top_n_regulators  = params$signaling.top_regulators,
+  weighted_networks = weighted_networks,
+  minmax_scaling    = params$signaling.minmax_scaling  # normalise edge weights for cleaner visualisation
+)
+
+# Combine both edge tables and build an igraph for visualisation
+sig_path_combined <- bind_rows(sig_path$sig, sig_path$gr)
+
+# Build igraph and visualise with ggraph
+sig_graph <- graph_from_data_frame(sig_path_combined, directed = TRUE)
+
+graph_plot <- ggraph(sig_graph, layout = "kk") +
+  geom_edge_link(
+    aes(edge_width = weight, edge_alpha = weight),
+    arrow    = arrow(length = unit(3, "mm"), type = "closed"),
+    end_cap  = circle(3, "mm"),
+    color    = params$graph.edge.color
+  ) +
+  geom_node_point(size = 5, color = params$graph.node.color) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  scale_edge_width(range = c(0.5, 2)) +
+  theme_void() +
+  labs(title = paste("Signaling path:", top_ligand, "->", top_target))
+
+ggsave(file.path(plot.dir, "signaling_path.pdf"),
+       plot = graph_plot, width = 8, height = 6)
+# ADDED: show the plot in the notebook
+print(graph_plot)
+```
+
+## Assign top ligands to specific sender cell types
+
+```{r step14_sender_assignment}
+#-----------------------------------------------
+# STEP 14: Assign Top Ligands to Specific Sender Cell Types
+#-----------------------------------------------
+# Assign each top ligand to its most likely sender cell type
+# based on highest average expression among all sender cell types
+
+# Use the average expression matrix computed in Step 11
+# (FIX: the article comment says "Step 12")
+ligand_sender_assignment <- apply(
+  ligand_expression_matrix[best_upstream_ligands, ],
+  1,
+  function(x) names(which.max(x))
+) %>%
+  enframe(name = "ligand", value = "best_sender_celltype")
+
+# Merge with ligand activity scores
+ligand_summary <- ligand_activities_focused %>%
+  filter(test_ligand %in% best_upstream_ligands_focused) %>%
+  rename(ligand = test_ligand) %>%
+  left_join(ligand_sender_assignment, by = "ligand") %>%
+  arrange(desc(aupr_corrected)) %>%
+  select(ligand, best_sender_celltype, aupr_corrected, auroc, pearson, rank)
+
+# Display the summary
+print(ligand_summary)
+
+# Save to file
+write.csv(ligand_summary, file.path(result.dir, "ligand_sender_summary.csv"), row.names = FALSE)
+```
+
+## Circos plot: which sender cell types influence which target genes
+
+```{r step15_circos_data}
+#-----------------------------------------------
+# STEP 15: Circos Plot Visualization — Which Sender Cell Types Influence Which Target Genes
+#-----------------------------------------------
+# Build sender → target edges:
+# For each top ligand, take its top 5 target genes and
+# assign the ligand's dominant sender cell type (from Step 14)
+# (FIX: the article comment says "Step 15")
+circos_data <- active_ligand_target_links_df %>%
+  group_by(ligand) %>%
+  slice_max(weight, n = params$circos.top_targets) %>%
+  ungroup() %>%
+  left_join(ligand_sender_assignment, by = "ligand") %>%
+  filter(!is.na(best_sender_celltype)) %>%
+  group_by(best_sender_celltype, target) %>%
+  summarise(n = n(), .groups = "drop")   # count ligands linking that sender to that target
+
+# ADDED: nothing to draw if no edges were found
+stopifnot(nrow(circos_data) > 0)
+
+# Define colors for sender cell types
+stopifnot(length(params$circos.celltypes) == length(params$circos.palette))
+sender_colors <- setNames(unlist(params$circos.palette), unlist(params$circos.celltypes))
+
+# Build color vector: senders get distinct colors, target genes stay grey
+all_nodes <- unique(c(circos_data$best_sender_celltype, circos_data$target))
+color_vector <- rep(params$circos.default.color, length(all_nodes))
+names(color_vector) <- all_nodes
+for (ct in names(sender_colors)) {
+  if (ct %in% names(color_vector))
+    color_vector[ct] <- sender_colors[ct]
+}
+```
+
+```{r step15_circos_draw}
+# ADDED: the drawing is wrapped in a function so the same plot can be written
+# to a PDF (article) and a PNG (shown in the notebook); circos.clear() before
+# each draw.
+draw_circos <- function() {
+  circos.clear()
+  chordDiagram(
+    x                 = circos_data,
+    grid.col          = color_vector,
+    transparency      = params$circos.transparency,
+    annotationTrack   = "grid",
+    preAllocateTracks = 1
+  )
+  circos.trackPlotRegion(
+    track.index = 1,
+    panel.fun   = function(x, y) {
+      xlim        <- get.cell.meta.data("xlim")
+      ylim        <- get.cell.meta.data("ylim")
+      sector_name <- get.cell.meta.data("sector.index")
+      circos.text(
+        mean(xlim), ylim[1] + 0.1,
+        sector_name, facing = "clockwise",
+        niceFacing = TRUE, adj = c(0, 0.5), cex = params$circos.label.cex
+      )
+    },
+    bg.border = NA
+  )
+  # receiver name from params
+  title(main = paste0("NicheNet: Predicted Sender Influences on ", receiver, " Target Genes"))
+}
+
+# Draw circos plot
+circos.pdf <- file.path(plot.dir, "nichenet_circos.pdf")
+circos.png <- file.path(plot.dir, "nichenet_circos.png")
+
+pdf(circos.pdf, width = 10, height = 10)
+draw_circos()
+invisible(dev.off())
+circos.clear()
+
+# ADDED: PNG twin for the notebook
+png(circos.png, width = 10, height = 10, units = "in", res = params$plot.dpi)
+draw_circos()
+invisible(dev.off())
+circos.clear()
+```
+
+The base-graphics circos plot (saved by the chunk above):
+
+```{r step15_show_circos, out.width = "80%"}
+# ADDED: show the base-graphics PNG saved above in the rendered notebook
+knitr::include_graphics(normalizePath(circos.png))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut10_nichenet_part2_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut10_nichenet_part2_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

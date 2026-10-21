@@ -1,0 +1,449 @@
+---
+title: "ngs101_scRNAseq_walkthrough_5 - Cell-type-specific differential analysis"
+subtitle: "part 3 - pseudobulk differential expression with DESeq2 and limma-voom"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
+  annotated.rds: "annotations/integrated_annotated_seurat.rds" # tutorial 4 part 3 output, relative to base.dir/annot.subdir
+  diff.subdir: "differential_analysis" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  patient.col: "patient_id" # metadata column with patient IDs
+  condition.ref: "Healthy" # reference condition level
+  condition.test: "Post_Treatment" # test condition level (contrasts are test vs. reference)
+  pb.min_count: 10 # DESeq2 filter: gene needs counts >= this ...
+  pb.min_samples: 3 # ... in at least this many samples
+  deseq.alpha: 0.05 # DESeq2 results() alpha
+  limma.min_count: 10 # limma filter: minimum total counts per gene across samples
+  de.padj: 0.05 # adjusted p-value cutoff for significance (DESeq2 padj, limma adj.P.Val)
+  de.lfc: 0.25 # absolute log2 fold-change cutoff for significance
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/single-cell-rna-seq-beginners-guide-part-5-cell-type-specific-differential-expression-proportion-testing-and-functional-pathway-analysis/>
+
+Part 3 of 4. Pseudobulk differential expression: counts from all cells of a
+given cell type in a given sample are summed, so that each sample (rather than
+each cell) is one replicate. DESeq2 (negative binomial) is run per cell type and
+limma-voom is used as an independent check.
+
+Code is taken from the source article's code blocks. Changes made for this
+notebook series: hard-coded values moved into the YAML front matter, paths built
+from `params` rather than `setwd()`, and the fixes marked `FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Differential expression
+library(DESeq2)
+library(limma)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_5_differential_analysis/tut5_differential_analysis_part3.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+diff.dir <- file.path(base.dir, params$diff.subdir)
+
+# Create output directories
+for (d in c("plots/DE_pseudobulk", "results")) {
+  if (!dir.exists(file.path(diff.dir, d))) dir.create(file.path(diff.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names and condition levels from params
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+patient.col <- params$patient.col
+cond.ref <- params$condition.ref
+cond.test <- params$condition.test
+```
+
+## Load annotated Seurat object from tutorial 4
+
+```{r step2_load_obj}
+#-----------------------------------------------
+# STEP 2: Load annotated Seurat object from tutorial 4
+#-----------------------------------------------
+
+annotated.file <- file.path(base.dir, params$annot.subdir, params$annotated.rds)
+cat("Reading in annotated Seurat object:", annotated.file, "\n")
+seurat_obj <- readRDS(annotated.file)
+
+stopifnot(all(c(celltype.col, sample.col, condition.col, patient.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(all(c(cond.ref, cond.test) %in% seurat_obj@meta.data[[condition.col]]))
+
+DefaultAssay(seurat_obj) <- "RNA"
+cell_types <- sort(unique(as.character(seurat_obj@meta.data[[celltype.col]])))
+```
+
+## Understanding the pseudobulk approach
+
+Cells from the same sample are not independent replicates; the sample (donor)
+is the biological replicate. Pseudobulk aggregation sums the counts of all cells
+of one cell type within one sample, e.g. for CD14+ monocytes:
+
+```
+Before aggregation (cell-level):
+  Healthy_1: 1,200 CD14+ monocytes (each with individual counts)
+  ...
+  Post_4: 950 CD14+ monocytes
+
+After aggregation (pseudobulk):
+  Healthy_1: Sum of 1,200 cells -> 1 pseudobulk sample
+  ...
+  Post_4: Sum of 950 cells -> 1 pseudobulk sample
+
+Result: 4 vs 4 samples (proper biological replicates)
+```
+
+With only 4 vs 4 samples, power is limited, so few genes may reach significance;
+that is an honest reflection of the replicate number rather than a failure of the
+method.
+
+## Create pseudobulk count matrices
+
+```{r step3_pseudobulk}
+#-----------------------------------------------
+# STEP 8: Create pseudobulk count matrices using PseudobulkExpression
+#-----------------------------------------------
+
+# Function to create pseudobulk for one cell type
+create_pseudobulk_seurat5 <- function(celltype, seurat_obj) {
+  # Subset to this cell type
+  cells.ct <- colnames(seurat_obj)[seurat_obj@meta.data[[celltype.col]] == celltype]
+  seurat_subset <- subset(seurat_obj, cells = cells.ct)
+
+  # Use PseudobulkExpression to aggregate counts by sample
+  pseudobulk_result <- PseudobulkExpression(
+    seurat_subset,
+    assays = "RNA",
+    group.by = sample.col,       # Aggregate by sample
+    layer = "counts",            # Use raw counts
+    method = "aggregate"         # Sum counts
+  )
+
+  # Extract the RNA counts matrix
+  pseudobulk_matrix <- pseudobulk_result$RNA
+
+  # Convert column names back to match original sample_id format
+  # (Seurat replaces "_" with "-" in aggregated group names)
+  colnames(pseudobulk_matrix) <- gsub("-", "_", colnames(pseudobulk_matrix))
+
+  # Return as regular matrix (required for DESeq2)
+  return(as.matrix(pseudobulk_matrix))
+}
+
+# Create pseudobulk for all cell types
+pseudobulk_list <- lapply(cell_types, function(ct) {
+  cat("  Processing:", ct, "\n")
+  create_pseudobulk_seurat5(ct, seurat_obj)
+})
+
+names(pseudobulk_list) <- cell_types
+
+saveRDS(pseudobulk_list, file.path(diff.dir, "results/pseudobulk_counts_list.rds"))
+```
+
+## DESeq2 for each cell type
+
+```{r step4_deseq2}
+#-----------------------------------------------
+# STEP 9: Run DESeq2 pseudobulk analysis
+#-----------------------------------------------
+
+# Create sample metadata
+sample_metadata <- unique(seurat_obj@meta.data[, c(sample.col, condition.col, patient.col)])
+
+sample_metadata <- as.data.frame(sample_metadata)
+rownames(sample_metadata) <- sample_metadata[[sample.col]]
+
+# Make the reference level explicit so the contrast is test vs. reference
+sample_metadata[[condition.col]] <- factor(sample_metadata[[condition.col]],
+                                           levels = c(cond.ref, cond.test))
+
+# Function to run DESeq2 for one cell type
+run_deseq2_celltype <- function(celltype, pseudobulk_counts, sample_metadata) {
+
+  # Get sample names from count matrix
+  samples_in_counts <- colnames(pseudobulk_counts)
+
+  # Verify that sample_metadata rownames match count matrix colnames
+  if (!all(samples_in_counts %in% rownames(sample_metadata))) {
+    stop("ERROR: Sample names in count matrix don't match sample_metadata rownames!")
+  }
+
+  # Order metadata to match count matrix columns
+  sample_metadata_ordered <- sample_metadata[samples_in_counts, , drop = FALSE]
+
+  # Create DESeq2 dataset
+  dds <- DESeqDataSetFromMatrix(
+    countData = pseudobulk_counts,
+    colData = sample_metadata_ordered,
+    design = as.formula(paste("~", condition.col))
+  )
+
+  # Filter low-count genes (improve power and speed)
+  keep <- rowSums(counts(dds) >= params$pb.min_count) >= params$pb.min_samples
+  dds <- dds[keep, ]
+
+  # Run DESeq2 analysis
+  dds <- DESeq(dds, quiet = TRUE)
+
+  # Extract results
+  res <- results(
+    dds,
+    contrast = c(condition.col, cond.test, cond.ref),
+    alpha = params$deseq.alpha
+  )
+
+  # Convert to data frame
+  res_df <- as.data.frame(res)
+  res_df$gene <- rownames(res_df)
+  res_df$cell_type <- celltype
+
+  # Add significance flag
+  res_df$significant <- !is.na(res_df$padj) &
+                        res_df$padj < params$de.padj &
+                        abs(res_df$log2FoldChange) > params$de.lfc
+
+  return(res_df)
+}
+
+# Run DESeq2 for all cell types
+deseq2_list <- lapply(cell_types, function(ct) {
+  run_deseq2_celltype(ct, pseudobulk_list[[ct]], sample_metadata)
+})
+
+names(deseq2_list) <- cell_types
+
+# Combine results
+deseq2_all <- do.call(rbind, deseq2_list)
+rownames(deseq2_all) <- NULL
+
+# Save results
+write.csv(deseq2_all, file.path(diff.dir, "results/deseq2_pseudobulk_results.csv"), row.names = FALSE)
+
+# Summary of significant genes per cell type
+deseq2_summary <- deseq2_all %>%
+  group_by(cell_type) %>%
+  summarise(
+    total_genes_tested = n(),
+    sig_genes = sum(significant, na.rm = TRUE),
+    sig_up = sum(significant & log2FoldChange > 0, na.rm = TRUE),
+    sig_down = sum(significant & log2FoldChange < 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(as.data.frame(deseq2_summary), row.names = FALSE)
+```
+
+## Validation with limma-voom
+
+limma-voom is an independent pseudobulk method; agreement between DESeq2 and
+limma-voom increases confidence in a gene. Note the gene filter differs from the
+DESeq2 one above (total counts rather than counts in a minimum number of
+samples), as in the source article.
+
+```{r step5_limma}
+#-----------------------------------------------
+# STEP 10: limma-voom pseudobulk analysis
+#-----------------------------------------------
+
+# Function to run limma-voom for one cell type
+# (named limma_paired_analysis in the article, but the design is unpaired:
+# ~0 + condition, no patient term)
+limma_voom_analysis <- function(
+    counts,
+    meta,
+    design_formula = as.formula(paste("~ 0 +", condition.col)),
+    contrast_str = paste(cond.test, "-", cond.ref),
+    min_count = params$limma.min_count,
+    voom_with_quality_weights = TRUE
+) {
+
+  # Order metadata to match count matrix columns
+  meta <- meta[match(colnames(counts), meta[[sample.col]]), ]
+  rownames(meta) <- meta[[sample.col]]
+
+  # Convert factors
+  meta[[condition.col]] <- factor(meta[[condition.col]], levels = c(cond.ref, cond.test))
+
+  # Filter low expressed genes
+  keep <- rowSums(counts) >= min_count
+  counts <- counts[keep, ]
+
+  # Create design matrix
+  design <- model.matrix(design_formula, data = meta)
+  colnames(design) <- gsub(condition.col, "", colnames(design))
+
+  # Voom transformation with quality weights
+  if (voom_with_quality_weights) {
+    v <- voomWithQualityWeights(counts, design, plot = FALSE)
+  } else {
+    v <- voom(counts, design, plot = FALSE)
+  }
+
+  # Fit linear model
+  fit <- lmFit(v, design)
+
+  # Define contrast
+  contrast.matrix <- makeContrasts(
+    contrasts = contrast_str,
+    levels = colnames(design)
+  )
+
+  # Fit contrasts
+  fit2 <- contrasts.fit(fit, contrast.matrix)
+  fit2 <- eBayes(fit2, trend = TRUE, robust = TRUE)
+
+  # Get results
+  res <- topTable(fit2, number = Inf, sort.by = "none", adjust.method = "BH")
+
+  return(res)
+}
+
+# Run limma for all cell types
+limma_list <- lapply(cell_types, function(ct) {
+  cat("\nProcessing:", ct, "\n")
+  limma_voom_analysis(pseudobulk_list[[ct]], sample_metadata)
+})
+
+names(limma_list) <- cell_types
+
+# Process limma results
+limma_all <- lapply(names(limma_list), function(ct) {
+  res <- limma_list[[ct]]
+  res$gene <- rownames(res)
+  res$cell_type <- ct
+  res$significant <- res$adj.P.Val < params$de.padj & abs(res$logFC) > params$de.lfc
+  return(res)
+}) %>% bind_rows()
+
+# Save results
+write.csv(limma_all, file.path(diff.dir, "results/limma_pseudobulk_results.csv"), row.names = FALSE)
+
+# Summary of significant genes per cell type
+limma_summary <- limma_all %>%
+  group_by(cell_type) %>%
+  summarise(
+    total_genes_tested = n(),
+    sig_genes = sum(significant, na.rm = TRUE),
+    sig_up = sum(significant & logFC > 0, na.rm = TRUE),
+    sig_down = sum(significant & logFC < 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(as.data.frame(limma_summary), row.names = FALSE)
+```
+
+## Compare methods (addition to the article)
+
+The article recommends reporting genes that are supported by more than one
+approach. This chunk tabulates, per cell type, the number of significant genes
+for each method and the overlap. Cell-level results from part 2 are included if
+that part has been run.
+
+```{r step6_compare_methods}
+sig_sets <- list(
+  DESeq2 = deseq2_all %>% filter(significant) %>% transmute(cell_type, gene),
+  limma = limma_all %>% filter(significant) %>% transmute(cell_type, gene)
+)
+
+findmarkers.file <- file.path(diff.dir, "results/findmarkers_celllevel_results.csv")
+if (file.exists(findmarkers.file)) {
+  fm <- read.csv(findmarkers.file)
+  sig_sets$FindMarkers <- fm %>% filter(significant) %>% transmute(cell_type, gene)
+}
+
+key <- function(df) paste(df$cell_type, df$gene, sep = "|")
+
+method_overlap <- data.frame(
+  cell_type = cell_types,
+  sapply(names(sig_sets), function(m) {
+    sapply(cell_types, function(ct) sum(sig_sets[[m]]$cell_type == ct))
+  }),
+  DESeq2_and_limma = sapply(cell_types, function(ct) {
+    length(intersect(key(sig_sets$DESeq2)[sig_sets$DESeq2$cell_type == ct],
+                     key(sig_sets$limma)[sig_sets$limma$cell_type == ct]))
+  }),
+  row.names = NULL
+)
+print(method_overlap, row.names = FALSE)
+write.csv(method_overlap, file.path(diff.dir, "results/pseudobulk_method_overlap.csv"), row.names = FALSE)
+
+# Genes significant in both pseudobulk methods
+both <- intersect(key(sig_sets$DESeq2), key(sig_sets$limma))
+write.csv(data.frame(do.call(rbind, strsplit(both, "|", fixed = TRUE))) %>%
+            setNames(c("cell_type", "gene")),
+          file.path(diff.dir, "results/pseudobulk_genes_both_methods.csv"), row.names = FALSE)
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut5_differential_part3_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut5_differential_part3_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

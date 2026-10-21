@@ -1,0 +1,314 @@
+---
+title: "ngs101_scRNAseq_walkthrough_5 - Cell-type-specific differential analysis"
+subtitle: "part 4 - functional state scoring with MSigDB gene sets"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
+  annotated.rds: "annotations/integrated_annotated_seurat.rds" # tutorial 4 part 3 output, relative to base.dir/annot.subdir
+  diff.subdir: "differential_analysis" # output subdirectory under base.dir for this tutorial
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  condition.ref: "Healthy" # reference condition level
+  condition.test: "Post_Treatment" # test condition level (contrasts are test vs. reference)
+  condition.palette: ["#2E86AB", "#F18F01"] # plot colors for reference, test (in that order)
+  species: "Homo sapiens" # msigdbr species name
+  genesets: ["H:HALLMARK_INFLAMMATORY_RESPONSE"] # MSigDB gene sets to score, as "collection:gene_set_name"
+  modulescore.nbin: 24 # AddModuleScore nbin
+  modulescore.ctrl: 100 # AddModuleScore ctrl
+  score.min_rows: 6 # minimum sample-level rows (samples) per cell type to run the test
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/single-cell-rna-seq-beginners-guide-part-5-cell-type-specific-differential-expression-proportion-testing-and-functional-pathway-analysis/>
+
+Part 4 of 4. Individual genes may change modestly while a whole pathway shifts.
+Each cell is scored for the expression of one or more MSigDB gene sets with
+`AddModuleScore()`; scores are then averaged per sample and cell type, and
+conditions are compared with a t-test across samples (so that samples, not
+cells, are the replicates).
+
+The article scores one gene set, `HALLMARK_INFLAMMATORY_RESPONSE`. Here the gene
+sets are a YAML list (`params$genesets`) and are looped over; the default is the
+article's single gene set. The article loads `fgsea` but never uses it, so it is
+not loaded here.
+
+**Limitation:** the per-sample t-test is unpaired and has no covariates. It also
+uses few samples (4 vs 4), so treat the p-values as a screen.
+
+Code is taken from the source article's code blocks. Changes made for this
+notebook series: hard-coded values moved into the YAML front matter, paths built
+from `params` rather than `setwd()`, and the fixes marked `FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+
+# Core single-cell analysis
+library(Seurat)
+library(SeuratObject)
+
+# Functional analysis
+library(msigdbr)
+
+# Visualization and data manipulation
+library(ggplot2)
+library(ggridges)
+library(dplyr)
+library(tidyr)
+
+if (!exists("params") || !is.list(params)) {
+  # Running interactively (e.g. via "Run Cell") rather than through
+  # knit/render, so `params` was never created by rmarkdown::render().
+  # Reconstruct it by parsing this .Rmd's own YAML header, so the params
+  # defaults live in exactly one place (the YAML block above) instead of
+  # being duplicated here.
+  rmd_path <- tryCatch(
+    # Only reliable when this document is the active editor tab; if focus
+    # has moved to another file, this will pick up the wrong path.
+    rstudioapi::getSourceEditorContext()$path,
+    error = function(e) NA_character_
+  )
+  if (is.na(rmd_path) || !nzchar(rmd_path)) {
+    # Fallback if rstudioapi is unavailable or no doc is focused; assumes
+    # the working directory is the project root.
+    rmd_path <- "scRNAseq_tutorial_5_differential_analysis/tut5_differential_analysis_part4.Rmd"
+  }
+  params <- rmarkdown::yaml_front_matter(rmd_path)$params
+}
+
+# Set working directory
+base.dir <- params$base.dir
+diff.dir <- file.path(base.dir, params$diff.subdir)
+
+# Create output directories
+for (d in c("plots/functional_scoring", "results")) {
+  if (!dir.exists(file.path(diff.dir, d))) dir.create(file.path(diff.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names, condition levels and colors from params
+celltype.col <- params$celltype.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+cond.ref <- params$condition.ref
+cond.test <- params$condition.test
+condition.colors <- setNames(unlist(params$condition.palette), c(cond.ref, cond.test))
+```
+
+## Load annotated Seurat object from tutorial 4
+
+```{r step2_load_obj}
+#-----------------------------------------------
+# STEP 2: Load annotated Seurat object from tutorial 4
+#-----------------------------------------------
+
+annotated.file <- file.path(base.dir, params$annot.subdir, params$annotated.rds)
+cat("Reading in annotated Seurat object:", annotated.file, "\n")
+seurat_obj <- readRDS(annotated.file)
+
+stopifnot(all(c(celltype.col, sample.col, condition.col) %in% colnames(seurat_obj@meta.data)))
+stopifnot(all(c(cond.ref, cond.test) %in% seurat_obj@meta.data[[condition.col]]))
+
+DefaultAssay(seurat_obj) <- "RNA"
+cell_types <- sort(unique(as.character(seurat_obj@meta.data[[celltype.col]])))
+```
+
+## Download gene sets from MSigDB
+
+Gene sets of roughly 15-200 genes score well with `AddModuleScore()`.
+
+```{r step3_genesets}
+#-----------------------------------------------
+# STEP 11: Download gene sets from MSigDB
+#-----------------------------------------------
+
+# Split "collection:gene_set_name" entries from params
+gs_requests <- strsplit(unlist(params$genesets), ":", fixed = TRUE)
+stopifnot(all(lengths(gs_requests) == 2))
+gs_requests <- data.frame(collection = sapply(gs_requests, `[`, 1),
+                          gs_name = sapply(gs_requests, `[`, 2))
+
+# msigdbr >= 10 names this argument `collection`; older versions use `category`
+get_msigdb <- function(species, collection) {
+  tryCatch(msigdbr(species = species, collection = collection),
+           error = function(e) msigdbr(species = species, category = collection))
+}
+
+geneset_list <- list()
+for (coll in unique(gs_requests$collection)) {
+  gene_sets <- get_msigdb(params$species, coll)
+  for (gs in gs_requests$gs_name[gs_requests$collection == coll]) {
+    genes <- gene_sets %>% filter(gs_name == gs) %>% pull(gene_symbol) %>% unique()
+    if (length(genes) == 0) {
+      warning("Gene set not found in collection ", coll, ": ", gs)
+      next
+    }
+    # Only genes present in the object can contribute to the score
+    geneset_list[[gs]] <- genes
+    cat(gs, ":", length(genes), "genes,", sum(genes %in% rownames(seurat_obj)), "present in object\n")
+  }
+}
+stopifnot(length(geneset_list) > 0)
+```
+
+## Score cells
+
+```{r step4_score}
+#-----------------------------------------------
+# STEP 12: Score cells with AddModuleScore
+#-----------------------------------------------
+
+score_cols <- character()
+for (gs in names(geneset_list)) {
+  # Seurat appends "1" to the name for the first feature list
+  tag <- make.names(gs)
+  seurat_obj <- AddModuleScore(
+    seurat_obj,
+    features = list(geneset_list[[gs]]),
+    name = tag,
+    nbin = params$modulescore.nbin,
+    ctrl = params$modulescore.ctrl
+  )
+
+  # Rename for clarity
+  score.col <- paste0(tag, "_Score")
+  colnames(seurat_obj@meta.data)[colnames(seurat_obj@meta.data) == paste0(tag, "1")] <- score.col
+  score_cols[gs] <- score.col
+}
+print(score_cols)
+```
+
+## Visualize pathway scores by cell type and condition
+
+```{r step5_ridge, fig.width = 10, fig.height = 8}
+#-----------------------------------------------
+# STEP 13: Visualize scores
+#-----------------------------------------------
+
+for (gs in names(score_cols)) {
+  # Ridge plot showing score distributions by cell type and condition
+  p_ridge <- ggplot(seurat_obj@meta.data,
+                    aes(x = .data[[score_cols[[gs]]]],
+                        y = .data[[celltype.col]],
+                        fill = .data[[condition.col]])) +
+    geom_density_ridges(alpha = 0.7) +
+    theme_classic(base_size = 12) +
+    labs(title = paste(gs, "scores"),
+         x = "Pathway Score",
+         y = "Cell Type",
+         fill = "Condition") +
+    scale_fill_manual(values = condition.colors)
+  print(p_ridge)
+
+  ggsave(file.path(diff.dir, "plots/functional_scoring", paste0("ridge_", gs, ".png")), p_ridge,
+         width = 10, height = 8, dpi = params$plot.dpi)
+}
+```
+
+## Statistical testing of pathway scores (pseudobulk approach)
+
+```{r step6_pathway_tests}
+#-----------------------------------------------
+# STEP 14: Pseudobulk statistical testing of pathway scores
+#-----------------------------------------------
+
+# Function to test one cell type for one score column
+test_pathway_celltype <- function(celltype, score_data) {
+  # Filter to this cell type
+  ct_data <- score_data %>% filter(.data[[celltype.col]] == celltype)
+
+  # FIX: return the same columns on every path (the article's early return
+  # included a `significant` column that the normal return lacked, which makes
+  # the later rbind() fail)
+  empty <- data.frame(cell_type = celltype, mean_ref = NA_real_, mean_test = NA_real_,
+                      diff = NA_real_, p_value = NA_real_)
+
+  if (nrow(ct_data) < params$score.min_rows) return(empty)
+
+  # Separate by condition
+  ref_scores <- ct_data %>% filter(.data[[condition.col]] == cond.ref) %>% pull(mean_score)
+  test_scores <- ct_data %>% filter(.data[[condition.col]] == cond.test) %>% pull(mean_score)
+
+  # t.test needs at least 2 observations per group
+  if (length(ref_scores) < 2 || length(test_scores) < 2) return(empty)
+
+  # Statistical test (t-test)
+  test_result <- t.test(test_scores, ref_scores)
+
+  data.frame(
+    cell_type = celltype,
+    mean_ref = mean(ref_scores),
+    mean_test = mean(test_scores),
+    diff = mean(test_scores) - mean(ref_scores),
+    p_value = test_result$p.value
+  )
+}
+
+pathway_results_all <- list()
+for (gs in names(score_cols)) {
+  # Aggregate scores by sample and cell type
+  score_aggregated <- seurat_obj@meta.data %>%
+    group_by(.data[[sample.col]], .data[[condition.col]], .data[[celltype.col]]) %>%
+    summarise(mean_score = mean(.data[[score_cols[[gs]]]]), .groups = "drop")
+
+  # Test all cell types
+  pathway_tests <- lapply(cell_types, test_pathway_celltype, score_data = score_aggregated)
+  pathway_results <- do.call(rbind, pathway_tests)
+
+  # Add FDR correction across cell types
+  pathway_results$FDR <- p.adjust(pathway_results$p_value, method = "BH")
+  pathway_results$gene_set <- gs
+
+  # Save results
+  write.csv(pathway_results, file.path(diff.dir, "results", paste0(gs, "_pathway_test.csv")),
+            row.names = FALSE)
+  pathway_results_all[[gs]] <- pathway_results
+
+  cat("\n", gs, "\n")
+  print(pathway_results, row.names = FALSE)
+}
+
+write.csv(bind_rows(pathway_results_all),
+          file.path(diff.dir, "results/pathway_tests_all_gene_sets.csv"), row.names = FALSE)
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut5_differential_part4_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut5_differential_part4_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

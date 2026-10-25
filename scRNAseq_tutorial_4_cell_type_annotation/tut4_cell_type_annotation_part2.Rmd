@@ -5,7 +5,8 @@ author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
-  annot.subdir: "cell_type_annotation" # output subdirectory under base.dir (same as part 1)
+  integr.dir: "integration_analysis" # output subdirectory under base.dir for integration results relstive to base.dir
+  annot.subdir: "cell_type_annotation" # output subdirectory under integr.dir (same as part 1)
   species: "human" # options are "human" or "mouse"; note the celldex/scType references used here are human
   seed: 42 # random seed
   cluster.col: "seurat_clusters" # metadata column holding cluster IDs
@@ -87,7 +88,8 @@ params <- params_ingest()
 
 # Set working directory
 base.dir <- params$base.dir
-annot.dir <- file.path(base.dir, params$annot.subdir)
+integr.dir <- file.path(base.dir, params$integr.dir)
+annot.dir <- file.path(integr.dir, params$annot.subdir)
 
 # Create output directories
 for (d in c("plots", "plots/automated_annotation", "annotations")) {

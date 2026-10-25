@@ -60,9 +60,6 @@ paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
 ## Libraries and directories
 
 ```{r step1_libs_data}
-#-----------------------------------------------
-# STEP 1: Load required libraries
-#-----------------------------------------------
 
 # Core single-cell analysis
 library(Seurat)
@@ -93,7 +90,7 @@ base.dir <- params$base.dir
 annot.dir <- file.path(base.dir, params$annot.subdir)
 
 # Create output directories
-for (d in c("plots/automated_annotation", "annotations")) {
+for (d in c("plots", "plots/automated_annotation", "annotations")) {
   if (!dir.exists(file.path(annot.dir, d))) dir.create(file.path(annot.dir, d), recursive = TRUE)
 }
 
@@ -106,8 +103,8 @@ theme_set(theme_classic(base_size = 12))
 cluster.col <- params$cluster.col
 
 # Files from part 1 and for part 3
-annotated_part1.file <- "integrated_manual_annotated_seurat.rds"
-annotated_part2.file <- "integrated_automated_annotated_seurat.rds"
+annotated_part1.file <- "merged_integrated_clustered_manual_annotated.rds"
+annotated_part2.file <- "merged_integrated_clustered_manual_auto_annotated.rds"
 
 if (params$species != "human") {
   warning("SingleR references and scType/scCATCH databases below are set up for human data; review before using species = '", params$species, "'")
@@ -117,9 +114,9 @@ if (params$species != "human") {
 ## Load object from part 1
 
 ```{r step2_load_obj}
-# ADDED: hand-off from part 1
-integrated_seurat <- readRDS(file.path(annot.dir, "annotations", annotated_part1.file))
-load(file.path(annot.dir, "annotations", "annot_part1.RData")) # umap_reduction, cluster_to_celltype
+
+integrated_seurat <- readRDS(file.path(integr.dir, annotated_part1.file))
+load(file.path(annot.dir, "annotations", "annot_part1.RData")) # umap_reduction, cluster_to_celltype objects
 
 DefaultAssay(integrated_seurat) <- "RNA"
 Idents(integrated_seurat) <- cluster.col

@@ -44,10 +44,42 @@ Primary source:
 
 <https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-4-cell-type-identification/>
 
-Part 1 of 3. Clusters from tutorial 3 are given biological identities by
-inspecting canonical marker genes and data-driven cluster markers, then
-assigning a manual label to each cluster. Parts 2 and 3 add automated
-annotation (SingleR, scType, scCATCH) and compare the methods.
+**Dataset reminder**: GSE174609 is a periodontitis study (8 samples: 4
+Healthy + 4 Post-Treatment PBMC samples). Peripheral blood is an ideal
+dataset for learning annotation because it has well-characterized cell
+types, clear canonical markers, and mature reference atlases.
+
+Walkthrough 3 produced an integrated, batch-corrected, and clustered Seurat
+object. Clustering only groups transcriptionally similar cells together -
+it says nothing about *what those cells are*. This walkthrough converts
+"Cluster 0, 1, 2 ..." into biologically meaningful labels such as "CD4+ T
+cells" or "Classical Monocytes."
+
+There is no single correct way to do this, so the original tutorial (and
+this walkthrough) uses **four complementary approaches** and then manually
+reconciles the results into a consensus:
+
+1. **Manual annotation** - canonical marker genes plus data-driven marker
+   discovery (`FindAllMarkers`). Time-consuming but the closest thing to a
+   gold standard, because it incorporates biological reasoning that no
+   algorithm currently replicates.
+2. **SingleR** - reference-based annotation. Correlates each cell's
+   expression profile against a curated, pre-labeled reference atlas
+   (`celldex`) and transfers the best-matching label.
+3. **scType** - marker-based gene set scoring. Uses a curated database of
+   positive/negative marker genes per cell type and scores each cluster's
+   enrichment.
+4. **scCATCH** - tissue-specific automated annotation. Automatically finds
+   cluster marker genes and matches them against a tissue-specific reference
+   database (`cellmatch`).
+
+Different methods fail in different ways, so agreement across methods builds
+confidence, and disagreement flags clusters that need closer inspection.
+
+**This .Rmd is part 1 of 3**. Clusters from walkthrough 3 are given biological
+identities by inspecting canonical marker genes and data-driven cluster
+markers, then assigning a manual label to each cluster. Parts 2 and 3 add
+automated annotation (SingleR, scType, scCATCH) and compare the methods.
 
 Code is taken from the source article's code blocks (steps 1-8). Changes made
 for this notebook series: hard-coded values moved into the YAML front matter,
@@ -57,10 +89,6 @@ paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
 ## Libraries and directories
 
 ```{r step1_libs_data}
-#-----------------------------------------------
-# STEP 1: Load required libraries
-#-----------------------------------------------
-
 # Core single-cell analysis
 library(Seurat)
 library(SeuratObject)
@@ -81,7 +109,7 @@ integr.dir <- file.path(base.dir, params$integr.dir)
 annot.dir <- file.path(integr.dir, params$annot.subdir)
 
 # Create output directories
-for (d in c("plots", "plots/manual_annotation")) {
+for (d in c("plots", "plots/manual_annotation", "annotations")) {
   if (!dir.exists(file.path(annot.dir, d))) dir.create(file.path(annot.dir, d), recursive = TRUE)
 }
 
@@ -104,13 +132,7 @@ annotated_part1.file <- "merged_integrated_clustered_manual_annotated.rds"
 ## Load integrated data from tutorial 3
 
 ```{r step2_load_obj}
-#-----------------------------------------------
-# STEP 2: Load integrated data from Part 3
-#-----------------------------------------------
-
 # Path to integrated Seurat object from Part 3
-# (the article reads integrated_clustered_seurat.rds; this series' tutorial 3
-# saves seurat_integrated_clustered.rds)
 integrated_path <- file.path(integr.dir, params$integrated.rds)
 
 # Load the object
@@ -132,10 +154,6 @@ cat("Using UMAP reduction:", umap_reduction, "\n")
 ### Visualize the starting point
 
 ```{r step3_start_plots, fig.width = 14, fig.height = 10}
-#-----------------------------------------------
-# STEP 3: Visualize clusters before annotation
-#-----------------------------------------------
-
 # Create multi-panel overview
 p1 <- DimPlot(integrated_seurat, reduction = umap_reduction,
               group.by = cluster.col, label = TRUE, label.size = 5,
@@ -170,11 +188,7 @@ This section may not be necesary if the integrated object already has a normaliz
 Set to `eval = FALSE` by default.
 
 ```{r step4_normalize, eval = FALSE}
-#-----------------------------------------------
-# STEP 4: Normalize and scale data
-#-----------------------------------------------
-
-# ADDED: tutorial 3 may leave SCT as the default assay and the RNA assay with
+# Tutorial 3 could leave SCT as the default assay and the RNA assay with
 # per-sample layers; work on a single joined RNA assay for normalization,
 # marker tests and scaling
 DefaultAssay(integrated_seurat) <- "RNA"
@@ -193,12 +207,42 @@ integrated_seurat <- ScaleData(integrated_seurat,
                                verbose = FALSE)
 ```
 
+### A caveat: `return.only.var.genes` and missing canonical markers with `SCTransform`
+
+If preceding work has used normalization with an `SCTransform` call and
+`return.only.var.genes = TRUE` (the default), only genes selected as highly
+variable will have corrected values in the `data` and `scale.data` layers
+of the `SCT` assay. Canonical marker genes used for manual annotation are not
+guaranteed to be highly variable (e.g. broadly-expressed lineage markers can have
+low cell-to-cell variance), so some may be missing from these layers and would
+silently fail to plot with `VlnPlot`/`FeaturePlot`/`DotPlot`/`DoHeatmap`.
+
+`Seurat::GetResidual()` computes corrected values for specific genes on
+demand, regardless of whether they were originally flagged as variable.
+Run this before checking marker presence below.
+
 ## Manual annotation: canonical marker genes
 
+### Understanding PBMC cell types
+
+Approximate expected composition of a healthy human PBMC sample (varies
+with disease, age, and technical factors):
+
+| Cell Type | Expected % | Key Markers | Function |
+|---|---|---|---|
+| T cells | 50-70% | CD3D, CD3E, CD3G | Adaptive immunity |
+| &nbsp;&nbsp;CD4+ T cells | 30-40% | CD3+, CD4+, IL7R | Helper T cells |
+| &nbsp;&nbsp;CD8+ T cells | 20-30% | CD3+, CD8A, CD8B | Cytotoxic T cells |
+| B cells | 10-15% | CD79A, MS4A1 (CD20), CD19 | Antibody production |
+| NK cells | 5-10% | NKG7, GNLY, NCAM1 (CD56) | Innate cytotoxicity |
+| Monocytes | 10-20% | CD14, LYZ, S100A8, S100A9 | Phagocytosis |
+| &nbsp;&nbsp;Classical | ~80% of mono | CD14+, FCGR3A- (CD16-) | CD14+ monocytes |
+| &nbsp;&nbsp;Non-classical | ~20% of mono | CD14low, FCGR3A+ (CD16+) | CD16+ monocytes |
+| Dendritic cells | 1-2% | FCER1A, CST3 | Antigen presentation |
+| Plasmacytoid DC | <1% | IL3RA, GZMB, SERPINF1 | Type I interferon |
+| Platelets | Variable | PPBP, PF4, GP9 | Usually contamination |
+
 ```{r step5_canonical_markers}
-#-----------------------------------------------
-# STEP 5: Define and check canonical markers
-#-----------------------------------------------
 
 # Define comprehensive marker panel for PBMC cell types
 canonical_markers <- list(
@@ -240,9 +284,6 @@ Violin and UMAP feature plots are saved to `plots/manual_annotation/`; the
 combined dot plot is also shown below.
 
 ```{r step6_visualize_markers, fig.width = 12, fig.height = 10}
-#-----------------------------------------------
-# STEP 6: Visualize canonical markers
-#-----------------------------------------------
 
 # Function to create violin plots for a marker set
 plot_violin_markers <- function(markers, cell_type_name, filename_suffix) {
@@ -316,7 +357,8 @@ all_markers_present <- all_markers[all_markers %in% rownames(integrated_seurat)]
 
 p_dotplot <- DotPlot(integrated_seurat,
                      features = all_markers_present,
-                     group.by = cluster.col) +
+                     group.by = cluster.col,
+                     cols = c("white", "firebrick")) +
   coord_flip() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
         axis.text.y = element_text(size = 8)) +
@@ -330,10 +372,15 @@ ggsave(file.path(annot.dir, "plots/manual_annotation/dotplot_all_canonical_marke
 
 ## Manual annotation: data-driven marker discovery
 
+Since `integrated_seurat_integrated` could have been created by running
+`SCTransform` across multiple sample layers (walkthrough 3, part 1; in `dev`
+subfolder 2026-10-25), the `SCT` assay may hold separate correction models
+per sample. `PrepSCTFindMarkers()` re-corrects counts to a common sequencing
+depth so that differential expression p-values and fold-changes are comparable
+across samples - this step is required before `FindAllMarkers` on an `SCT` assay
+and is *not* part of the standard-`NormalizeData` workflow.
+
 ```{r step7_findallmarkers, fig.width = 12, fig.height = 14}
-#-----------------------------------------------
-# STEP 7: Find cluster-specific marker genes
-#-----------------------------------------------
 
 # Gene patterns removed from marker lists, species-dependent
 # (article: "^RP[SL]" and "^MT-", human)
@@ -393,6 +440,13 @@ print(p_heatmap)
 ggsave(file.path(annot.dir, "plots/manual_annotation/06_heatmap_top_markers.png"), p_heatmap,
        width = 12, height = 14, dpi = params$plot.dpi)
 ```
+
+Interpreting the `FindAllMarkers` output: `avg_log2FC` is higher when a gene
+is more specific to that cluster; `pct.1` is the percentage of cells *in*
+the cluster expressing the gene; `pct.2` is the percentage of cells *outside*
+the cluster expressing it. A good marker has high `pct.1`, low `pct.2`, and
+a large positive `avg_log2FC`. `min.pct = 0.25` requires the gene be
+detected in at least 25% of cells in the cluster before being tested at all.
 
 ## Manual annotation: assign cluster identities
 
@@ -471,7 +525,7 @@ ggsave(file.path(annot.dir, "plots/manual_annotation/08_manual_annotation_by_con
 
 ```{r step9_save}
 # ADDED: hand-off to part 2
-saveRDS(integrated_seurat, file.path(annot.dir, "annotations", annotated_part1.file))
+saveRDS(integrated_seurat, file.path(integr.dir, annotated_part1.file))
 save(umap_reduction, cluster_to_celltype,
      file = file.path(annot.dir, "annotations", "annot_part1.RData"))
 ```

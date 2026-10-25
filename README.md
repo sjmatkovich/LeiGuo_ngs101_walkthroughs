@@ -1,6 +1,6 @@
 # Code notebooks to implement tutorials from ngs101 website
 
-Started 2026-05, **last updated** 2026-10-14
+Started 2026-05, **last updated** 2026-10-25
 
 Follow-along coding for tutorials from [Lei Guo's ngs101 website](https://ngs101.com/tutorials/)
 
@@ -42,7 +42,7 @@ renv::restore()
 
 While the [scRNAseq_tutorial_1_data_ingestion](./scRNAseq_tutorial_1_data_ingestion) folder provides code needed to perform Cellranger processing of fastq files from the `GSE174609` repository, this requires compute cluster resources for efficient work.
 
-Instead, an alternative is to ignore the `scRNAseq_tutorial_1` folder and begin with `scRNAeq_tutorial_2` and its `_part1_alternate.Rmd` notebook to analyze previously downloaded count matrices.
+Instead, an alternative is to ignore the `scRNAseq_tutorial_1` folder and begin with `scRNAseq_tutorial_2` and its `_part1_alternate.Rmd` notebook to analyze previously downloaded count matrices.
 
 Bash commands for data download and unpack tar archive to `.csv.gz` files for each sample. Run these in a terminal in which the working directory is set to the desired data storage location.
 
@@ -53,9 +53,9 @@ wget -qO- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE174nnn/GSE174609/suppl/GSE
 
 I added code to easily loop over multiple samples to generate QC metrics in tutorial 2.
 
-I also modified some of the integration code in tutorial 3 to:
-- use `SCTransform` normalization (**note 2026-10-10**: alter this to offer `SCTransform` in a parallel notebook series, but keep the main notebooks on standard Seurat log-normalization)
-- preserve all reductions within the same Seurat object, rather than creating a separate object for each integration method.
+I also modified some of the text in tutorial 3 to:
+- point out differences needed if `SCTransform` normalization (**note 2026-10-25**: previous `SCTransform` code has been moved to a `tut3_SCTransform_dev` directory, but the main notebooks remain on standard Seurat log-normalization)
+- preserve all reductions within the same Seurat object, rather than creating a separate object for each integration method, during selection of integration methods
 
 
 

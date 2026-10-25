@@ -133,13 +133,20 @@ from the reference.
 
 ### Test multiple references
 
+HumanPrimaryCellAtlas (Broad), MonacoImmuneData (immune-specific), DatabaseImmuneCellExpression (DICE)
+
 ```{r step3_singler, message = FALSE}
-#-----------------------------------------------
-# STEP 9: SingleR with multiple reference datasets
-#-----------------------------------------------
 
 # Convert Seurat to SingleCellExperiment for SingleR
 sce <- as.SingleCellExperiment(integrated_seurat)
+
+# Layers may be on-disk BPCells matrices, which DelayedArray (used inside
+# SingleR) cannot wrap; pull the log-normalized data into memory as a dgCMatrix.
+# Only logcounts is needed, so drop the other assays to save memory.
+sce <- SingleCellExperiment::SingleCellExperiment(
+  assays = list(logcounts = as(SummarizedExperiment::assay(sce, "logcounts"), "dgCMatrix")),
+  colData = SummarizedExperiment::colData(sce)
+)
 
 # Reference 1: HumanPrimaryCellAtlas (Broad)
 hpca_ref <- celldex::HumanPrimaryCellAtlasData()
@@ -165,7 +172,7 @@ singler_monaco <- SingleR(
 
 integrated_seurat$singler_monaco <- singler_monaco$labels
 
-# Reference 3: DatabaseImmuneCellExpression
+# Reference 3: DatabaseImmuneCellExpression (dice)
 dice_ref <- celldex::DatabaseImmuneCellExpressionData()
 
 singler_dice <- SingleR(
@@ -179,6 +186,8 @@ integrated_seurat$singler_dice <- singler_dice$labels
 ```
 
 ### Compare references
+
+Include the previous manual annotation for comparison.
 
 ```{r step4_singler_compare, fig.width = 16, fig.height = 12}
 #-----------------------------------------------

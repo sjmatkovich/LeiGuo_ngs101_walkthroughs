@@ -132,7 +132,7 @@ annotated_part1.file <- "merged_integrated_clustered_manual_annotated.rds"
 ## Load integrated data from tutorial 3
 
 ```{r step2_load_obj}
-# Path to integrated Seurat object from Part 3
+# Path to integrated Seurat object from tutorial 3
 integrated_path <- file.path(integr.dir, params$integrated.rds)
 
 # Load the object

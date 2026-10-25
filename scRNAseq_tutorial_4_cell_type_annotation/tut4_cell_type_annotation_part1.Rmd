@@ -455,11 +455,9 @@ checked against the dot plot, violin plots and marker tables above for any new
 run (different clustering resolution = different cluster numbers).**
 
 ```{r step8_manual_mapping, fig.width = 10, fig.height = 8}
-#-----------------------------------------------
-# STEP 8: Manual cell type assignment
-#-----------------------------------------------
 
 # EXAMPLE MAPPING - CUSTOMIZE FOR YOUR DATA
+# customized 2026-10-25
 cluster_to_celltype <- c(
   "0" = "CD4+ T cells",
   "1" = "CD4+ T cells",

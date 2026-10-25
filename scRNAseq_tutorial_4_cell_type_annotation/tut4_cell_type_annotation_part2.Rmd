@@ -68,6 +68,7 @@ library(SeuratObject)
 
 # Automated annotation methods
 library(SingleR)
+library(BiocParallel) # speed up SingleR
 library(celldex)
 library(scCATCH)
 
@@ -148,6 +149,13 @@ sce <- SingleCellExperiment::SingleCellExperiment(
   colData = SummarizedExperiment::colData(sce)
 )
 
+## Set up BiocParallel for use with SingleR
+# Ubuntu / Linux optimized parameters
+# availableCores() respects cgroup/SLURM limits; detectCores() does not
+n_workers <- max(1L, parallelly::availableCores() - 2L)
+
+bp <- MulticoreParam(workers = n_workers, progressbar = TRUE, RNGseed = 1234)
+
 # Reference 1: HumanPrimaryCellAtlas (Broad)
 hpca_ref <- celldex::HumanPrimaryCellAtlasData()
 
@@ -155,7 +163,8 @@ singler_hpca <- SingleR(
   test = sce,
   ref = hpca_ref,
   labels = hpca_ref$label.main,
-  assay.type.test = "logcounts"
+  assay.type.test = "logcounts",
+  BPPARAM = bp
 )
 
 integrated_seurat$singler_hpca <- singler_hpca$labels
@@ -167,7 +176,8 @@ singler_monaco <- SingleR(
   test = sce,
   ref = monaco_ref,
   labels = monaco_ref$label.main,
-  assay.type.test = "logcounts"
+  assay.type.test = "logcounts",
+  BPPARAM = bp
 )
 
 integrated_seurat$singler_monaco <- singler_monaco$labels
@@ -179,7 +189,8 @@ singler_dice <- SingleR(
   test = sce,
   ref = dice_ref,
   labels = dice_ref$label.main,
-  assay.type.test = "logcounts"
+  assay.type.test = "logcounts",
+  BPPARAM = bp
 )
 
 integrated_seurat$singler_dice <- singler_dice$labels
@@ -190,9 +201,6 @@ integrated_seurat$singler_dice <- singler_dice$labels
 Include the previous manual annotation for comparison.
 
 ```{r step4_singler_compare, fig.width = 16, fig.height = 12}
-#-----------------------------------------------
-# STEP 10: Compare SingleR references
-#-----------------------------------------------
 
 # Visualize all three references
 p_hpca <- DimPlot(integrated_seurat, reduction = umap_reduction,
@@ -221,6 +229,8 @@ print(p_ref_comparison)
 ggsave(file.path(annot.dir, "plots/automated_annotation/10_singler_reference_comparison.png"),
        p_ref_comparison, width = 16, height = 12, dpi = params$plot.dpi)
 ```
+
+### Choose primary SingleR annotation method
 
 ```{r step4b_singler_choose, fig.width = 11, fig.height = 8}
 # For this tutorial, we'll use Monaco as the primary SingleR annotation

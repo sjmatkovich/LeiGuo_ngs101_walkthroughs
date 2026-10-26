@@ -292,7 +292,7 @@ print(names(gs_list$gs_positive))
 
 A quantile cutoff is applied to low-confidence clusters relative to the other clusters, so with 0.6 about 60% of clusters are labelled "Unknown" by construction. Change `params$sctype.unknown_quantile` if this is too aggressive.
 
-The call to `LayerData(integrated_seurat, layer = "scale.data")` in the first line assumes that a single scale.data layer exists in the Seurat object. This will have been derived from normalization and scaling after a previous `JoinLayers` call in preceding work on the same object, in previous .Rmd notebooks. Data will be materialized into memory, which may be slow and demanding on memory for large objects.
+The call to `LayerData(integrated_seurat, layer = "scale.data")` in the first line assumes that a single `scale.data` layer exists in the Seurat object. This will have been derived from normalization and scaling after a previous `JoinLayers` call in preceding work on the same object, in a previous .Rmd notebook (`_part1`). Data will be materialized into memory, which may be slow and demanding on memory for large objects.
 
 ```{r step6_sctype_score, fig.width = 11, fig.height = 8}
 
@@ -363,15 +363,14 @@ scCATCH finds cluster-specific marker genes and matches them to a curated
 tissue-specific database (`cellmatch`).
 
 ```{r step7_sccatch, message = FALSE, fig.width = 11, fig.height = 8}
-#-----------------------------------------------
-# STEP 14: scCATCH annotation
-#-----------------------------------------------
 
 sccatch_species <- c(human = "Human", mouse = "Mouse")[[params$species]]
 
 # Prepare data for scCATCH
 obj_sccatch <- createscCATCH(
-  data = LayerData(integrated_seurat, layer = "data"),
+  # scCATCH requires an in-memory matrix/dgCMatrix; the layer may be an
+  # on-disk BPCells matrix, so convert it.
+  data = as(LayerData(integrated_seurat, layer = "data"), "dgCMatrix"),
   cluster = as.character(integrated_seurat@meta.data[[cluster.col]])
 )
 
@@ -438,11 +437,10 @@ write.csv(marker_evidence,
           row.names = FALSE)
 ```
 
-## Save object for part 3
+## Save object for import in part 3
 
 ```{r step8_save}
-# ADDED: hand-off to part 3
-saveRDS(integrated_seurat, file.path(annot.dir, "annotations", annotated_part2.file))
+saveRDS(integrated_seurat, file.path(integr.dir, annotated_part2.file))
 ```
 
 ## R sessionInfo

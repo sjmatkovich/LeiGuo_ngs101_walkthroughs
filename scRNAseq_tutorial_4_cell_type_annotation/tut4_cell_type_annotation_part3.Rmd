@@ -5,7 +5,9 @@ author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
-  annot.subdir: "cell_type_annotation" # output subdirectory under base.dir (same as parts 1-2)
+  integr.dir: "integration_analysis" # output subdirectory under base.dir for integration results relstive to base.dir
+  annot.subdir: "cell_type_annotation" # output subdirectory under integr.dir (same as part 1)
+  cluster.comparison.file: "annotations/cluster_level_comparison.csv" # cluster-level comparison file prepared via manual review with 'consensus_annotation' column added. In annot.sbudir
   seed: 42 # random seed
   cluster.col: "seurat_clusters" # metadata column holding cluster IDs
   sample.col: "sample_id" # metadata column with sample IDs
@@ -52,9 +54,6 @@ paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
 ## Libraries and directories
 
 ```{r step1_libs_data}
-#-----------------------------------------------
-# STEP 1: Load required libraries
-#-----------------------------------------------
 
 # Core single-cell analysis
 library(Seurat)
@@ -73,10 +72,11 @@ params <- params_ingest()
 
 # Set working directory
 base.dir <- params$base.dir
-annot.dir <- file.path(base.dir, params$annot.subdir)
+integr.dir <- file.path(base.dir, params$integr.dir)
+annot.dir <- file.path(integr.dir, params$annot.subdir)
 
 # Create output directories
-for (d in c("plots/method_comparison", "annotations")) {
+for (d in c("plots", "plots/method_comparison", "annotations")) {
   if (!dir.exists(file.path(annot.dir, d))) dir.create(file.path(annot.dir, d), recursive = TRUE)
 }
 
@@ -92,14 +92,14 @@ condition.col <- params$condition.col
 patient.col <- params$patient.col
 
 # Files from part 2 and final outputs
-annotated_part2.file <- "integrated_automated_annotated_seurat.rds"
+annotated_part2.file <- "merged_integrated_clustered_manual_auto_annotated.rds"
+cluster_comparison.file <- here(annot.dir, params$cluster.comparison.file)
 ```
 
 ## Load object from part 2
 
 ```{r step2_load_obj}
-# ADDED: hand-off from part 2
-integrated_seurat <- readRDS(file.path(annot.dir, "annotations", annotated_part2.file))
+integrated_seurat <- readRDS(file.path(integr.dir, annotated_part2.file))
 load(file.path(annot.dir, "annotations", "annot_part1.RData")) # umap_reduction, cluster_to_celltype
 
 stopifnot(all(c("manual_annotation", "singler_annotation", "sctype_annotation",
@@ -113,11 +113,7 @@ Cell-level cross-tabulation of each automated method against the manual
 annotation.
 
 ```{r step3_confusion}
-#-----------------------------------------------
-# STEP 15: Generate confusion matrices
-#-----------------------------------------------
 
-# Function to create confusion matrix
 # FIX: the article's version of this function is cut off on the page (no
 # return value and no closing brace, so the calls below would be swallowed
 # into the function body); completed here
@@ -125,7 +121,8 @@ create_confusion_matrix <- function(method1_labels, method2_labels,
                                    method1_name, method2_name) {
   conf_table <- table(
     Method1 = method1_labels,
-    Method2 = method2_labels
+    Method2 = method2_labels,
+    dnn = c(method1_name, method2_name) # dimension names
   )
 
   cat("\n===", method1_name, "(rows) vs.", method2_name, "(columns) ===\n")
@@ -165,9 +162,6 @@ write.csv(conf_manual_vs_sccatch,
 ## Sankey diagrams
 
 ```{r step4_sankey, fig.width = 12, fig.height = 10}
-#-----------------------------------------------
-# STEP 16: Create Sankey diagrams
-#-----------------------------------------------
 
 # Function to prepare Sankey data
 prepare_sankey_data <- function(method1_labels, method2_labels,
@@ -244,9 +238,6 @@ ggsave(file.path(annot.dir, "plots/method_comparison/16_sankey_manual_vs_sccatch
 ## Side-by-side UMAP comparison
 
 ```{r step5_umap_compare, fig.width = 18, fig.height = 14}
-#-----------------------------------------------
-# STEP 17: Create comprehensive UMAP comparison
-#-----------------------------------------------
 
 # Create individual plots with consistent styling
 p_manual_comp <- DimPlot(
@@ -303,9 +294,6 @@ ggsave(file.path(annot.dir, "plots/method_comparison/17_all_methods_comparison.p
 ### Step 1: Export annotations for manual review
 
 ```{r step6_export}
-#-----------------------------------------------
-# STEP 18: Export annotations for manual comparison
-#-----------------------------------------------
 
 # Create comprehensive annotation table
 annotation_comparison <- data.frame(
@@ -320,7 +308,7 @@ annotation_comparison <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Export to CSV for manual review
+# Export to CSV for manual, granular review
 write.csv(annotation_comparison,
           file.path(annot.dir, "annotations/all_methods_comparison.csv"),
           row.names = FALSE)
@@ -354,22 +342,20 @@ print(as.data.frame(cluster_summary), row.names = FALSE)
 ### Step 2: Manual comparison
 
 Open `annotations/cluster_level_comparison.csv` (in the tutorial 4 output
-directory) in a spreadsheet, add a column named `consensus_annotation`, and fill
+directory, `r annot.dir`) in a spreadsheet, add a column named `consensus_annotation`, and fill
 in a label for each cluster using method agreement together with the marker
 evidence from part 1. Save it as CSV, then run the remaining chunks. They are
 skipped while the column is missing or empty.
 
+### PAUSE HERE
+
 ### Step 3: Import consensus and finalize
 
 ```{r step7_import, fig.width = 11, fig.height = 8}
-#-----------------------------------------------
-# STEP 19: Import consensus annotations
-#-----------------------------------------------
 
 # Read your manually edited cluster consensus file
 # (Save your Excel/Google Sheets file as CSV first)
-cluster_consensus <- read.csv(cluster_comparison.file,
-                              stringsAsFactors = FALSE)
+cluster_consensus <- read.csv(cluster_comparison.file)
 
 # ADDED: skip the rest if the consensus column has not been filled in yet
 have_consensus <- "consensus_annotation" %in% colnames(cluster_consensus) &&
@@ -434,7 +420,7 @@ ggsave(file.path(annot.dir, "plots/method_comparison/19_consensus_by_condition.p
 #-----------------------------------------------
 
 # Save the complete annotated Seurat object
-saveRDS(integrated_seurat, file.path(annot.dir, "annotations/integrated_annotated_seurat.rds"))
+saveRDS(integrated_seurat, file.path(integr.dir, "merged_integrated_clustered_annotated.rds"))
 
 # Create metadata export
 metadata_export <- integrated_seurat@meta.data %>%
@@ -449,7 +435,7 @@ metadata_export <- integrated_seurat@meta.data %>%
   )
 
 write.csv(metadata_export,
-          file.path(annot.dir, "annotations/cell_metadata_final.csv"),
+          file.path(integr.dir, "metadata/cell_metadata_tut4_final.csv"),
           row.names = TRUE)
 ```
 

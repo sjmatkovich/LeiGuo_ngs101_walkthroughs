@@ -265,6 +265,7 @@ each cluster takes its top-scoring type.
 
 Source and database files are downloaded from GitHub, but versions available on 2026-10-26 are available in the `scRNAseq_scType_2026-10-26` subdirectory of this repository.
 
+
 ```{r step5_sctype_load, message = FALSE}
 
 # Load scType functions from GitHub
@@ -290,6 +291,8 @@ print(names(gs_list$gs_positive))
 ### Calculate and visualize scType scores
 
 A quantile cutoff is applied to low-confidence clusters relative to the other clusters, so with 0.6 about 60% of clusters are labelled "Unknown" by construction. Change `params$sctype.unknown_quantile` if this is too aggressive.
+
+The call to `LayerData(integrated_seurat, layer = "scale.data")` in the first line assumes that a single scale.data layer exists in the Seurat object. This will have been derived from normalization and scaling after a previous `JoinLayers` call in preceding work on the same object, in previous .Rmd notebooks. Data will be materialized into memory, which may be slow and demanding on memory for large objects.
 
 ```{r step6_sctype_score, fig.width = 11, fig.height = 8}
 

@@ -136,7 +136,7 @@ from the reference.
 
 HumanPrimaryCellAtlas (Broad), MonacoImmuneData (immune-specific), DatabaseImmuneCellExpression (DICE)
 
-```{r step3_singler, message = FALSE}
+```{r step3_singler, message = TRUE, warning = FALSE}
 
 # Convert Seurat to SingleCellExperiment for SingleR
 sce <- as.SingleCellExperiment(integrated_seurat)
@@ -263,18 +263,13 @@ Each cell's scaled expression is scored against positive (and negative) marker
 sets for each cell type in the database, scores are summed per cluster, and
 each cluster takes its top-scoring type.
 
+Source and database files are downloaded from GitHub, but versions available on 2026-10-26 are available in the `scRNAseq_scType_2026-10-26` subdirectory of this repository.
+
 ```{r step5_sctype_load, message = FALSE}
-#-----------------------------------------------
-# STEP 11: Load scType functions
-#-----------------------------------------------
 
 # Load scType functions from GitHub
 source(file.path(params$sctype.fn_url, "gene_sets_prepare.R"))
 source(file.path(params$sctype.fn_url, "sctype_score_.R"))
-
-#-----------------------------------------------
-# STEP 12: Load scType marker database
-#-----------------------------------------------
 
 # Download the full database
 db_url <- params$sctype.db_url
@@ -292,10 +287,11 @@ cat("Available cell types in database:\n")
 print(names(gs_list$gs_positive))
 ```
 
+### Calculate and visualize scType scores
+
+A quantile cutoff is applied to low-confidence clusters relative to the other clusters, so with 0.6 about 60% of clusters are labelled "Unknown" by construction. Change `params$sctype.unknown_quantile` if this is too aggressive.
+
 ```{r step6_sctype_score, fig.width = 11, fig.height = 8}
-#-----------------------------------------------
-# STEP 13: Calculate scType scores
-#-----------------------------------------------
 
 # Get scaled data
 scaled_data <- as.matrix(LayerData(integrated_seurat, layer = "scale.data"))

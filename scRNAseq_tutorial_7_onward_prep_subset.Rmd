@@ -1,0 +1,391 @@
+---
+title: "ngs101_scRNAseq_walkthrough_interlude - subset seurat object to reduce burden for later tutorials"
+author: "Scot J Matkovich; Lei Guo"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+params:
+  base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  integr.dir: "integration_analysis" # output subdirectory under base.dir for integration results relstive to base.dir
+  annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
+  annotated.rds: "merged_integrated_annotated_clustered.rds" # tutorial 4 part 3 output, relative to base.dir/integr.dir
+  seed: 42 # random seed
+  celltype.col: "final_annotation" # metadata column with cell type labels
+  cluster.col: "seurat_clusters" # metadata column with cluster IDs
+  sample.col: "sample_id" # metadata column with sample IDs
+  condition.col: "condition" # metadata column with condition labels
+  condition.levels: ["Healthy", "Post_Treatment"] # condition labels, in the same order as condition.palette
+  condition.palette: ["#2E86AB", "#F18F01"] # plot colors for each condition level
+  umap.priority: ["umap.harmony", "umap.cca", "umap.rpca", "umap.mnn", "umap"] # first reduction found is used
+  exclude.celltypes: ["Platelets"] # cell types too rare for trajectory analysis
+  downsample.fraction: 0.1 # fraction of cells kept per cell type
+  downsample.min_cells: 50 # minimum cells kept per cell type (rare types)
+  lineage.celltypes: ["CD4+ T cells", "CD8+ T cells", "T cells", "NK cells"] # cell types in the lineage analysed here
+  plot.dpi: 300 # ggsave resolution
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Primary source:
+
+<https://ngs101.com/how-to-analyze-single-cell-rna-seq-data-complete-beginners-guide-part-7-2-trajectory-analysis-using-slingshot/>
+
+Part 1 of 3. Slingshot is an alternative to Monocle 3 (tutorial 7) for
+trajectory inference. It works on a low-dimensional embedding (here UMAP) and
+cluster labels: it builds a minimum spanning tree between clusters to define
+**lineages**, then fits a smooth **principal curve** along each lineage, giving
+every cell a pseudotime per lineage and a weight for each lineage.
+
+The article applies Slingshot to a single biologically related lineage rather
+than to all PBMC cell types together. Mature, terminally differentiated PBMC
+types (B cells, monocytes) are not on a common differentiation path with T/NK
+cells, so forcing them into one trajectory gives a misleading result. Here the
+T/NK lineage (`params$lineage.celltypes`) is analysed.
+
+This notebook: loads the annotated Seurat object from tutorial 4, downsamples
+each cell type, subsets to the lineage, and converts it to a
+`SingleCellExperiment`. Part 2 runs Slingshot; part 3 validates the trajectory
+and finds trajectory-associated genes.
+
+Code is taken from the source article's code blocks (steps 1-6). Changes made
+for this notebook series: hard-coded values moved into the YAML front matter,
+paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
+`FIX:` in comments.
+
+## Libraries and directories
+
+```{r step1_libs_data}
+#-----------------------------------------------
+# STEP 1: Load required libraries
+#-----------------------------------------------
+
+# Core trajectory analysis
+library(slingshot)
+library(SingleCellExperiment)
+library(princurve)
+library(TrajectoryUtils)
+
+# Single-cell analysis infrastructure
+library(Seurat)
+library(SeuratObject)
+
+# Data manipulation
+library(dplyr)
+library(tidyr)
+
+# Visualization
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+library(scales)
+library(grDevices)
+
+source(here::here("helper_functions", "params_read.R"))
+params <- params_ingest()
+
+# Set working directory
+base.dir <- params$base.dir
+integr.dir <- file.path(base.dir, params$integr.dir)
+traj.dir <- file.path(integr.dir, params$traj.subdir)
+
+# Create organized output directories
+for (d in c("plots", "plots/trajectories", "plots/pseudotime", "results")) {
+  if (!dir.exists(file.path(traj.dir, d))) dir.create(file.path(traj.dir, d), recursive = TRUE)
+}
+
+# Set random seed for reproducibility
+set.seed(params$seed)
+
+# Configure plotting defaults
+theme_set(theme_classic(base_size = 12))
+
+# Column names, condition levels and colors from params
+celltype.col <- params$celltype.col
+cluster.col <- params$cluster.col
+sample.col <- params$sample.col
+condition.col <- params$condition.col
+condition.colors <- setNames(unlist(params$condition.palette), unlist(params$condition.levels))
+
+cat("Environment setup complete!\n")
+cat("Slingshot version:", as.character(packageVersion("slingshot")), "\n")
+cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
+```
+
+## Understanding the Slingshot workflow
+
+1. Load the annotated Seurat object (tutorial 4)
+2. Downsample cells (10% per cell type for tutorial efficiency)
+3. Subset to the lineage and convert Seurat -> SingleCellExperiment (SCE)
+4. Run Slingshot trajectory inference (part 2)
+5. Extract lineages and pseudotime (part 2)
+6. Visualize trajectories and curves (part 2)
+7. Identify trajectory-associated genes (part 3)
+8. Integrate results back to Seurat (part 3)
+
+## Load the annotated Seurat object from tutorial 4
+
+```{r step2_load_obj}
+#-----------------------------------------------
+# STEP 2: Load annotated Seurat object from Part 4
+#-----------------------------------------------
+
+# Load the complete annotated object
+annotated.file <- file.path(integr.dir, params$annotated.rds)
+cat("Reading in annotated Seurat object:", annotated.file, "\n")
+seurat_full <- readRDS(annotated.file)
+
+stopifnot(all(c(celltype.col, cluster.col, sample.col, condition.col) %in% colnames(seurat_full@meta.data)))
+
+# Verify data structure
+cat("Original dataset:\n")
+cat("  Total cells:", ncol(seurat_full), "\n")
+cat("  Total genes:", nrow(seurat_full), "\n")
+cat("  Samples:", length(unique(seurat_full@meta.data[[sample.col]])), "\n")
+cat("  Cell types:", length(unique(seurat_full@meta.data[[celltype.col]])), "\n\n")
+
+# Check cell type distribution
+cat("Cell type distribution (full dataset):\n")
+cell_type_counts <- table(seurat_full@meta.data[[celltype.col]])
+print(cell_type_counts)
+cat("\n")
+
+# Check which UMAP reduction is available
+available_reductions <- names(seurat_full@reductions)
+cat("Available reductions:", paste(available_reductions, collapse = ", "), "\n")
+```
+
+## Strategic downsampling: maintaining biological diversity
+
+Sampling a fixed fraction from every cell type keeps all cell types represented
+(sampling at random from the whole dataset can lose rare types) while reducing
+computation.
+
+```{r step3_downsample}
+#-----------------------------------------------
+# STEP 3: Downsample to a fraction of cells per cell type (exclude rare types)
+#-----------------------------------------------
+
+# Set seed for reproducible downsampling
+set.seed(params$seed)
+
+# Get unique cell types and exclude rare cell types (Platelets in the article;
+# too rare)
+all_cell_types <- unique(seurat_full@meta.data[[celltype.col]])
+cell_types <- all_cell_types[!all_cell_types %in% unlist(params$exclude.celltypes)]
+
+cat("Cell types to analyze (excluding ", paste(unlist(params$exclude.celltypes), collapse = ", "), "):\n", sep = "")
+print(cell_types)
+cat("\n")
+
+# Sample a fraction from each cell type independently
+downsampled_cells <- c()
+
+for (cell_type in cell_types) {
+  # Get all cells of this type
+  cells_of_type <- colnames(seurat_full)[seurat_full@meta.data[[celltype.col]] == cell_type]
+
+  # Calculate fraction (with a minimum number of cells for rare types)
+  n_sample <- max(params$downsample.min_cells, round(length(cells_of_type) * params$downsample.fraction))
+
+  # Don't sample more cells than exist
+  n_sample <- min(n_sample, length(cells_of_type))
+
+  # Random sample
+  sampled <- sample(cells_of_type, n_sample)
+  downsampled_cells <- c(downsampled_cells, sampled)
+
+  cat(sprintf("  %s: %d → %d cells (%.1f%%)\n",
+              cell_type, length(cells_of_type), n_sample,
+              100 * n_sample / length(cells_of_type)))
+}
+
+# Create downsampled Seurat object
+seurat_subset <- subset(seurat_full, cells = downsampled_cells)
+
+cat("\n")
+cat("Downsampled dataset:\n")
+cat("  Total cells:", ncol(seurat_subset), "\n")
+cat("  Cell types retained:", length(unique(seurat_subset@meta.data[[celltype.col]])), "\n")
+cat("  Reduction from full:",
+    round(100 * (1 - ncol(seurat_subset)/ncol(seurat_full)), 1), "%\n\n")
+
+# Verify cell type representation
+cat("Cell type distribution (downsampled):\n")
+print(table(seurat_subset@meta.data[[celltype.col]]))
+```
+
+## Visualize the downsampled dataset
+
+```{r step4_overview, fig.width = 16, fig.height = 12}
+#-----------------------------------------------
+# STEP 4: Visualize downsampled data
+#-----------------------------------------------
+
+# Determine which UMAP to use (from Part 3 integration)
+umap_reduction <- intersect(unlist(params$umap.priority), names(seurat_subset@reductions))[1]
+if (is.na(umap_reduction)) stop("None of params$umap.priority found in object reductions: ",
+                                paste(names(seurat_subset@reductions), collapse = ", "))
+
+cat("Using UMAP reduction:", umap_reduction, "\n\n")
+
+# Create multi-panel overview
+p1 <- DimPlot(seurat_subset, reduction = umap_reduction,
+              group.by = celltype.col, label = TRUE,
+              label.size = 3.5, pt.size = 0.8, repel = TRUE) +
+  ggtitle("Cell Types (Downsampled Data)") +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "right")
+
+p2 <- DimPlot(seurat_subset, reduction = umap_reduction,
+              group.by = condition.col, pt.size = 0.8) +
+  ggtitle("Condition Distribution") +
+  scale_color_manual(values = condition.colors) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+p3 <- DimPlot(seurat_subset, reduction = umap_reduction,
+              group.by = cluster.col, label = TRUE,
+              pt.size = 0.8) +
+  ggtitle("Seurat Clusters") +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "right")
+
+# Combine plots
+p_overview <- (p1 | p2) / (p3 | plot_spacer())
+print(p_overview)
+
+ggsave(file.path(traj.dir, "plots/01_downsampled_data_overview.png"), p_overview,
+       width = 16, height = 12, dpi = params$plot.dpi)
+```
+
+## Critical decision: choose the right analysis strategy
+
+Analysing every PBMC cell type in one trajectory would force unrelated
+terminally differentiated cell types (B cells, monocytes, T/NK cells) onto a
+single path; the resulting "pseudotime" would reflect lineage identity rather
+than a biological process. The strategy used here is a **cell-type-specific
+trajectory**: choose a biologically related lineage, subset to it, and run
+Slingshot on that subset.
+
+## Subset to the lineage
+
+```{r step5_subset_lineage, fig.width = 10, fig.height = 8}
+#-----------------------------------------------
+# STEP 5: Subset to T/NK cell lineage
+#-----------------------------------------------
+
+# Define T/NK cell types
+t_nk_types <- unlist(params$lineage.celltypes)
+
+# Subset Seurat object
+seurat_t_nk <- seurat_subset[, seurat_subset@meta.data[[celltype.col]] %in% t_nk_types]
+
+cat("T/NK lineage subset:\n")
+cat("  Total cells:", ncol(seurat_t_nk), "\n")
+cat("  Cell types:", length(unique(seurat_t_nk@meta.data[[celltype.col]])), "\n\n")
+
+# Cell type distribution
+cat("Cell type distribution in T/NK subset:\n")
+print(table(seurat_t_nk@meta.data[[celltype.col]]))
+cat("\n")
+
+# Visualize T/NK subset
+p_t_nk_subset <- DimPlot(seurat_t_nk,
+                         reduction = umap_reduction,
+                         group.by = celltype.col,
+                         label = TRUE,
+                         pt.size = 1) +
+  ggtitle("T/NK Cell Lineage Subset") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+print(p_t_nk_subset)
+
+ggsave(file.path(traj.dir, "plots/02_t_nk_subset.png"), p_t_nk_subset,
+       width = 10, height = 8, dpi = params$plot.dpi)
+```
+
+## Convert the subset to SingleCellExperiment
+
+```{r step6_convert_sce}
+#-----------------------------------------------
+# STEP 6: Convert T/NK subset to SingleCellExperiment
+#-----------------------------------------------
+
+# Convert Seurat to SCE (preserves all data, metadata, and reductions)
+sce <- as.SingleCellExperiment(seurat_t_nk)
+
+cat("Created SingleCellExperiment object for T/NK lineage:\n")
+cat("  Cells:", ncol(sce), "\n")
+cat("  Genes:", nrow(sce), "\n")
+cat("  Assays:", paste(assayNames(sce), collapse = ", "), "\n")
+cat("  Reduced dimensions:", paste(reducedDimNames(sce), collapse = ", "), "\n")
+cat("  Cell metadata columns:", ncol(colData(sce)), "\n\n")
+
+# Verify critical components transferred
+cat("Verifying transferred information:\n")
+cat("  Expression data (counts):", "counts" %in% assayNames(sce), "\n")
+cat("  Expression data (logcounts):", "logcounts" %in% assayNames(sce), "\n")
+cat("  Cell types (", celltype.col, "):",
+    celltype.col %in% colnames(colData(sce)), "\n")
+cat("  Clusters (", cluster.col, "):",
+    cluster.col %in% colnames(colData(sce)), "\n\n")
+
+# Extract UMAP coordinates using the reduction determined in Step 4
+# When converting Seurat to SCE, reduction names become uppercase
+# e.g., "umap.cca" becomes "UMAP.CCA"
+sce_umap_name <- toupper(umap_reduction)
+
+cat("UMAP reduction from Seurat:", umap_reduction, "\n")
+cat("SCE reduction name:", sce_umap_name, "\n")
+cat("Available in SCE:", sce_umap_name %in% reducedDimNames(sce), "\n\n")
+
+# Extract UMAP coordinates
+umap_coords <- reducedDim(sce, sce_umap_name)
+
+cat("UMAP coordinates:\n")
+cat("  Dimensions:", dim(umap_coords), "\n")
+cat("  Range X:", round(range(umap_coords[,1]), 2), "\n")
+cat("  Range Y:", round(range(umap_coords[,2]), 2), "\n\n")
+
+# Create standardized "UMAP" entry for Slingshot
+# Slingshot expects reducedDim to be named "UMAP"
+reducedDim(sce, "UMAP") <- umap_coords
+```
+
+The SingleCellExperiment structure: `assays()` holds expression matrices
+(counts, logcounts, ...), `colData()` cell metadata, `rowData()` gene metadata
+and `reducedDims()` dimensionality reductions (PCA, UMAP, ...).
+
+## Save objects for part 2
+
+```{r step7_save}
+# ADDED: hand-off to part 2
+saveRDS(seurat_t_nk, file.path(traj.dir, "results/seurat_T_NK_subset.rds"))
+saveRDS(sce, file.path(traj.dir, "results/sce_T_NK.rds"))
+save(umap_reduction, file = file.path(traj.dir, "results/slingshot_part1.RData"))
+```
+
+## R sessionInfo
+
+```{r export_sessionInfo}
+session.dir <- file.path(base.dir, "sessionInfo")
+if (!dir.exists(session.dir)) {
+  dir.create(session.dir, recursive = TRUE)
+}
+
+write.csv(unlist(sessionInfo()), file = file.path(session.dir, "tut7-2_slingshot_part1_sessionInfo.csv"))
+sessionInfo() |>
+  capture.output(file = file.path(session.dir, "tut7-2_slingshot_part1_sessionInfo_summary.txt"))
+
+sessionInfo()
+```

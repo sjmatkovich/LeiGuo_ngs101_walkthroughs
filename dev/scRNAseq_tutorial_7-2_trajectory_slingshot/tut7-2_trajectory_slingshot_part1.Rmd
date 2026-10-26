@@ -5,9 +5,10 @@ author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
+  integr.dir: "integration_analysis" # output subdirectory under base.dir for integration results relstive to base.dir
   annot.subdir: "cell_type_annotation" # tutorial 4 output subdirectory under base.dir
-  annotated.rds: "annotations/integrated_annotated_seurat.rds" # tutorial 4 part 3 output, relative to base.dir/annot.subdir
-  traj.subdir: "trajectory_slingshot" # output subdirectory under base.dir for this tutorial
+  annotated.rds: "merged_integrated_annotated_clustered.rds" # tutorial 4 part 3 output, relative to base.dir/integr.dir
+  traj.subdir: "trajectory_slingshot" # output subdirectory under integr.dir for this tutorial
   seed: 42 # random seed
   celltype.col: "final_annotation" # metadata column with cell type labels
   cluster.col: "seurat_clusters" # metadata column with cluster IDs
@@ -98,7 +99,8 @@ params <- params_ingest()
 
 # Set working directory
 base.dir <- params$base.dir
-traj.dir <- file.path(base.dir, params$traj.subdir)
+integr.dir <- file.path(base.dir, params$integr.dir)
+traj.dir <- file.path(integr.dir, params$traj.subdir)
 
 # Create organized output directories
 for (d in c("plots", "plots/trajectories", "plots/pseudotime", "results")) {
@@ -142,7 +144,7 @@ cat("Seurat version:", as.character(packageVersion("Seurat")), "\n")
 #-----------------------------------------------
 
 # Load the complete annotated object
-annotated.file <- file.path(base.dir, params$annot.subdir, params$annotated.rds)
+annotated.file <- file.path(integr.dir, params$annotated.rds)
 cat("Reading in annotated Seurat object:", annotated.file, "\n")
 seurat_full <- readRDS(annotated.file)
 

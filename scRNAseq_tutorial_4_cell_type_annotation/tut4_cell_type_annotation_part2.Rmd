@@ -61,6 +61,7 @@ paths built from `params` rather than `setwd()`, and changes marked `ADDED:` or
 ## Libraries and directories
 
 ```{r step1_libs_data}
+library(here)
 
 # Core single-cell analysis
 library(Seurat)

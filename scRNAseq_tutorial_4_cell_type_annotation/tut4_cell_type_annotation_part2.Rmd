@@ -362,6 +362,8 @@ write.csv(cL_results, file.path(annot.dir, "annotations/sctype_cluster_scores.cs
 scCATCH finds cluster-specific marker genes and matches them to a curated
 tissue-specific database (`cellmatch`).
 
+Again, an in-memory data matrix is equired, so the `LayerData` call materializes the `data` layer into memory. This may be slow and memory-intensive for large objects. I observed ~22 Gb memory usage during `findmarkergene` call.
+
 ```{r step7_sccatch, message = FALSE, fig.width = 11, fig.height = 8}
 
 sccatch_species <- c(human = "Human", mouse = "Mouse")[[params$species]]

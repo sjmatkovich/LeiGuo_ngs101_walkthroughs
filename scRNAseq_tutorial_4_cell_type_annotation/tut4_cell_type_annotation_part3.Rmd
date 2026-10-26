@@ -415,9 +415,6 @@ ggsave(file.path(annot.dir, "plots/method_comparison/19_consensus_by_condition.p
 ## Save annotated data
 
 ```{r step8_save, eval = have_consensus}
-#-----------------------------------------------
-# STEP 20: Save final annotated Seurat object
-#-----------------------------------------------
 
 # Save the complete annotated Seurat object
 saveRDS(integrated_seurat, file.path(integr.dir, "merged_integrated_clustered_annotated.rds"))
@@ -435,7 +432,7 @@ metadata_export <- integrated_seurat@meta.data %>%
   )
 
 write.csv(metadata_export,
-          file.path(integr.dir, "metadata/cell_metadata_tut4_final.csv"),
+          file.path(integr.dir, "metadata/cell_metadata_tutorial4_final.csv"),
           row.names = TRUE)
 ```
 

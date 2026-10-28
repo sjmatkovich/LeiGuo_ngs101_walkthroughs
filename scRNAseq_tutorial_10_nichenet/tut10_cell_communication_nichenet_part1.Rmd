@@ -5,8 +5,8 @@ author: "Scot J Matkovich; Lei Guo"
 date: "`r format(Sys.time(), '%Y-%m-%d')`"
 params:
   base.dir: "~/projects/GSE174609_scRNA" # working directory for analysis files; subdirectories will be created
-  input.subdir: "trajectory_analysis" # tutorial 7 (Monocle 3) output subdirectory under base.dir
-  input.rds: "results/seurat_subset_downsampled.rds" # tutorial 7 part 1 output (downsampled annotated object), relative to base.dir/input.subdir
+  integr.dir: "integration_analysis" # tutorial 7 (Monocle 3) output subdirectory under base.dir
+  input.rds: "subset_merged_integrated_clustered_annotated.rds" # tutorial 7 part 1 output (downsampled annotated object), relative to base.dir/input.subdir
   nichenet.subdir: "cell_communication_nichenet" # output subdirectory under base.dir for this tutorial
   model.cache.dir: "" # folder for the downloaded NicheNet prior models; empty = base.dir/nichenet_models
   zenodo.base: "https://zenodo.org/record/7074291/files/" # Zenodo record holding the human prior models
@@ -65,7 +65,8 @@ receptors, sender assignment, optional extended prioritization, signaling paths
 and the circos plot).
 
 **Input:** the downsampled Seurat object written by tutorial 7 part 1
-(`scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part1.Rmd`).
+(`scRNAseq_tutorial_7_trajectory_monocle3/tut7_trajectory_monocle3_part1.Rmd`)
+or separately from the smaller .Rmd `scRNAseq_tutorial_7_onward_prep_subset.Rmd`.
 That notebook must be run first to create `seurat_subset_downsampled.rds`; no
 downsampling is done here.
 
@@ -78,9 +79,10 @@ in comments.
 ## Libraries and directories
 
 ```{r step1_libs_data}
-#-----------------------------------------------
-# STEP 1: Load Libraries, Prior Models, and Data
-#-----------------------------------------------
+
+library(here)
+library(BPCells)
+
 library(nichenetr)
 library(Seurat)
 library(tidyverse)
@@ -95,11 +97,12 @@ params <- params_ingest()
 
 # Working directories
 base.dir <- params$base.dir
+integr.dir <- file.path(base.dir, params$integr.dir)
 nichenet.dir <- file.path(base.dir, params$nichenet.subdir)
 
 # Create output directories
 # (article: dir.create("plots/nichenet", recursive = TRUE, showWarnings = FALSE))
-for (d in c("plots/nichenet", "results")) {
+for (d in c("plots", "results")) {
   dir.create(file.path(nichenet.dir, d), recursive = TRUE, showWarnings = FALSE)
 }
 
@@ -149,9 +152,6 @@ for (i in seq_along(params$model.files)) {
 ## Load prior models and data
 
 ```{r step1b_load_models_data}
-#-----------------------------------------------
-# STEP 1 (continued): Load prior models and data
-#-----------------------------------------------
 
 # Load NicheNet prior model files (downloaded earlier)
 lr_network           <- readRDS(file.path(model.cache.dir, "lr_network_human.rds"))
@@ -163,7 +163,7 @@ lr_network <- lr_network %>% distinct(from, to)
 
 # Load the downsampled annotated Seurat object
 # (ADDED: from tutorial 7 part 1, which must have been run first)
-input.file <- file.path(base.dir, params$input.subdir, params$input.rds)
+input.file <- file.path(integr.dir, params$input.rds)
 stopifnot(file.exists(input.file))
 cat("Reading in Seurat object:", input.file, "\n")
 seurat_obj <- readRDS(input.file)

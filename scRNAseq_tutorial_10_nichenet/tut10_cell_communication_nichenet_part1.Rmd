@@ -174,7 +174,7 @@ stopifnot(all(c(celltype.col, condition.col) %in% colnames(seurat_obj@meta.data)
 stopifnot(params$assay %in% names(seurat_obj@assays))
 if (inherits(seurat_obj[[params$assay]], "Assay5") &&
     !"counts" %in% Layers(seurat_obj[[params$assay]])) {
-  # split layers (counts.1, counts.2, ...) need to be joined for GetAssayData()
+  # split layers (counts.1, counts.2, ...) need to be joined for LayerData()
   seurat_obj <- JoinLayers(seurat_obj, assay = params$assay)
 }
 
@@ -190,10 +190,10 @@ print(table(seurat_obj[[condition.col, drop = TRUE]]))
 
 ## Define receiver and sender cell types
 
+Ensure the defined cell types correspond to the cell type labels in the Seurat object.
+
 ```{r step2_receiver_sender}
-#-----------------------------------------------
-# STEP 2: Define Receiver and Sender Cell Types
-#-----------------------------------------------
+
 # Define the receiver cell type
 receiver <- params$receiver
 
@@ -221,15 +221,13 @@ stopifnot(receiver %in% all_cell_types,
 ## Determine expressed genes in receiver and sender cells
 
 ```{r step3_expressed_genes}
-#-----------------------------------------------
-# STEP 3: Determine Expressed Genes in Receiver and Sender Cells
-#-----------------------------------------------
+
 # Extract the count matrix and cell identity vector once for efficiency.
-expr_mat    <- GetAssayData(seurat_obj, assay = params$assay, layer = "counts")
+expr_mat    <- LayerData(seurat_obj, assay = params$assay, layer = "counts")
 cell_idents <- Idents(seurat_obj)
 
 # Identify expressed genes in the receiver population
-# A gene is "expressed" if detected in >=10% of receiver cells
+# A gene is "expressed" if detected in >=10% of receiver cells or as defined in params$expressed.pcgt
 expressed_genes_receiver <- get_expressed_genes(
   celltype_oi    = receiver,
   object         = expr_mat,
@@ -262,10 +260,14 @@ cat("Expressed genes in senders (union):", length(expressed_genes_sender), "\n")
 
 ## Define the gene set of interest
 
+Subset Seurat object to the receiver cell type and run `FindMarkers` to identify DE genes.
+
+**NOTE:** this could be rewritten to use e.g. a DE gene set obtained via pseudobulk + limma-voom or similar in the receiver cell population, rather than an individual-cell DE test with inflated p-value significance.
+
+**NOTE 2026-10-27:** for the current downsampled data set and receiver cell type, zero genes pass the DE filter (and only 26 in the article). Adjust the DE filter parameters in the YAML front matter. To get this tutorial to run, it may be necessary to select unadjusted `p_val` rather than `p_val_adj`.
+
 ```{r step4_geneset}
-#-----------------------------------------------
-# STEP 4: Define the Gene Set of Interest
-#-----------------------------------------------
+
 # Subset to receiver cell type
 seurat_receiver <- subset(seurat_obj, idents = receiver)
 

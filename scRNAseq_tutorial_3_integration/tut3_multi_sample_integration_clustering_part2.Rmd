@@ -35,6 +35,7 @@ Primary source:
 ## Libraries, directories, defaults
 
 ```{r step1_libs_data}
+library(here)
 
 # Core single-cell analysis
 library(Seurat)

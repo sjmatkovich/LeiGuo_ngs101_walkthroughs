@@ -59,6 +59,7 @@ library(here)
 # Core single-cell analysis
 library(Seurat)
 library(SeuratObject)
+library(BPCells)
 
 # Visualization and data manipulation
 library(ggplot2)

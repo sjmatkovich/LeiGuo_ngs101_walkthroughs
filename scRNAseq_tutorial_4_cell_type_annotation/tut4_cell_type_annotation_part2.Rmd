@@ -66,6 +66,7 @@ library(here)
 # Core single-cell analysis
 library(Seurat)
 library(SeuratObject)
+library(BPCells)
 
 # Automated annotation methods
 library(SingleR)

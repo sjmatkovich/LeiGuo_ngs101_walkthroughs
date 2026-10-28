@@ -35,6 +35,8 @@ If these are not available (such as input scRNAseq data in the form of processed
 ## Libraries and directories
 
 ```{r step1_libs_data}
+library(here)
+
 # Fast import
 library(data.table)
 library(tibble)

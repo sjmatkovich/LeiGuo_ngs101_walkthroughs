@@ -23,7 +23,7 @@ params:
   condition.reference: "Healthy" # reference condition
   expressed.pct: 0.10 # a gene is expressed if detected in at least this fraction of cells of a cell type
   de.min_pct: 0.10 # FindMarkers min.pct for the receiver DE test
-  de.padj: 0.05 # adjusted p-value cutoff for the gene set of interest
+  de.padj: 0.01 # adjusted p-value cutoff for the gene set of interest
   de.log2fc: 0.25 # minimum avg_log2FC (upregulated in condition.oi) for the gene set of interest
   top.n.ligands: 20 # number of top ligands taken from each approach
 output:
@@ -160,7 +160,7 @@ ligand_target_matrix <- readRDS(file.path(model.cache.dir, "ligand_target_matrix
 weighted_networks    <- readRDS(file.path(model.cache.dir, "weighted_networks_human.rds"))
 
 # Keep only unique ligand-receptor pairs
-lr_network <- lr_network %>% distinct(from, to)
+lr_network <- lr_network |> distinct(from, to)
 
 # Load the downsampled annotated Seurat object
 # (ADDED: from tutorial 7 part 1, which must have been run first)
@@ -264,7 +264,7 @@ Subset Seurat object to the receiver cell type and run `FindMarkers` to identify
 
 **NOTE:** this could be rewritten to use e.g. a DE gene set obtained via pseudobulk + limma-voom or similar in the receiver cell population, rather than an individual-cell DE test with inflated p-value significance.
 
-**NOTE 2026-10-27:** for the current downsampled data set and receiver cell type, zero genes pass the DE filter (and only 26 in the article). Adjust the DE filter parameters in the YAML front matter. To get this tutorial to run, it may be necessary to select unadjusted `p_val` rather than `p_val_adj`.
+**NOTE 2026-10-27:** for the current downsampled data set and receiver cell type, zero genes pass the DE filter (and only 26 in the article). Adjust the DE filter parameters in the YAML front matter. To get this tutorial to run, it was necessary to select unadjusted `p_val` rather than `p_val_adj`.
 
 ```{r step4_geneset}
 
@@ -284,12 +284,16 @@ DE_table_receiver <- FindMarkers(
 
 # Filter to significant, biologically meaningful DE genes
 # and restrict to genes present in the NicheNet ligand-target model
-geneset_oi <- DE_table_receiver %>%
-  filter(p_val_adj <= params$de.padj & avg_log2FC >= params$de.log2fc) %>%  # upregulated in Post_Treatment
-  rownames() %>%
+geneset_oi <- DE_table_receiver |>
+  filter(p_val <= params$de.padj & avg_log2FC >= params$de.log2fc) |>  # upregulated in Post_Treatment
+  rownames() |>
   intersect(rownames(ligand_target_matrix))
+# geneset_oi <- DE_table_receiver %>%
+#   filter(p_val_adj <= params$de.padj & avg_log2FC >= params$de.log2fc) %>%  # upregulated in Post_Treatment
+#   rownames() %>%
+#   intersect(rownames(ligand_target_matrix))
 
-length(geneset_oi)  # how many genes passed filtering? 26 in our case
+length(geneset_oi)  # how many genes passed filtering? 26 in the case of the original tutorial. 33 using p_val - 0.01 not p_val_adj  = 0.05 to make tutorial run.
 
 # ADDED: the ligand activity analysis cannot run on an empty gene set
 stopifnot(length(geneset_oi) > 0)
@@ -299,9 +303,7 @@ write.csv(DE_table_receiver, file.path(nichenet.dir, "results/DE_table_receiver.
 ## Define potential ligands
 
 ```{r step5_potential_ligands}
-#-----------------------------------------------
-# STEP 5: Define Potential Ligands
-#-----------------------------------------------
+
 # Identify all receptors expressed by the receiver population
 expressed_receptors <- intersect(
   lr_network$to,
@@ -321,10 +323,10 @@ expressed_receptors <- intersect(
 # Potential ligands: any ligand in the network with an expressed receptor in receiver.
 all_genes_detected <- rownames(seurat_obj)
 
-potential_ligands_agnostic <- lr_network %>%
-  filter(to %in% expressed_receptors) %>%
-  pull(from) %>%
-  unique() %>%
+potential_ligands_agnostic <- lr_network |>
+  filter(to %in% expressed_receptors) |>
+  pull(from) |>
+  unique() |>
   intersect(all_genes_detected)  # keep only ligands present in the assay
 
 # --- Sender-focused approach ---
@@ -334,9 +336,9 @@ expressed_ligands_sender <- intersect(
 )
 
 # Potential ligands: expressed in sender AND have expressed receptor in receiver
-potential_ligands_focused <- lr_network %>%
-  filter(from %in% expressed_ligands_sender & to %in% expressed_receptors) %>%
-  pull(from) %>%
+potential_ligands_focused <- lr_network |>
+  filter(from %in% expressed_ligands_sender & to %in% expressed_receptors) |>
+  pull(from) |>
   unique()
 
 # ADDED: report the sizes
@@ -348,9 +350,7 @@ cat("Potential ligands (sender-focused):", length(potential_ligands_focused), "\
 ## Run ligand activity analysis
 
 ```{r step6_ligand_activity}
-#-----------------------------------------------
-# STEP 6: Run Ligand Activity Analysis
-#-----------------------------------------------
+
 # Run ligand activity analysis — sender-agnostic
 ligand_activities_agnostic <- predict_ligand_activities(
   geneset                  = geneset_oi,
@@ -368,12 +368,12 @@ ligand_activities_focused <- predict_ligand_activities(
 )
 
 # Sort by corrected AUPR and assign rank using row_number() on the sorted result.
-ligand_activities_agnostic <- ligand_activities_agnostic %>%
-  arrange(desc(aupr_corrected)) %>%
+ligand_activities_agnostic <- ligand_activities_agnostic |>
+  arrange(desc(aupr_corrected)) |>
   mutate(rank = row_number())
 
-ligand_activities_focused <- ligand_activities_focused %>%
-  arrange(desc(aupr_corrected)) %>%
+ligand_activities_focused <- ligand_activities_focused |>
+  arrange(desc(aupr_corrected)) |>
   mutate(rank = row_number())
 
 # ADDED: show the top of each table and save them
@@ -386,9 +386,7 @@ write.csv(ligand_activities_focused, file.path(nichenet.dir, "results/ligand_act
 ## Select top ligands for downstream analysis
 
 ```{r step7_top_ligands}
-#-----------------------------------------------
-# STEP 7: Select Top Ligands for Downstream Analysis
-#-----------------------------------------------
+
 # Select top 20 ligands from each approach
 top_n <- params$top.n.ligands
 
